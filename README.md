@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="./.github/logo.png" alt="Lane">
+</p>
+
+<p align="center">
   <a href="https://github.com/rluders/lane/actions/workflows/ci.yml">
     <img src="https://github.com/rluders/lane/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
@@ -22,8 +26,6 @@
   </a>
   <img src="https://img.shields.io/badge/dependencies-1-blue" alt="1 dependency">
 </p>
-
-`lane` is a lightweight Go runtime that coordinates the lifecycle of service Runners.
 
 ## 🤔 What is lane?
 
