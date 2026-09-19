@@ -3,15 +3,18 @@ package runners
 import (
 	"context"
 	"log/slog"
+	"time"
 )
+
+const workerErrorBackoff = 100 * time.Millisecond
 
 // WorkFn is the unit of work executed each iteration.
 // Return an error to trigger the onError callback.
 // Return ctx.Err() (or nil) to stop cleanly.
 type WorkFn func(ctx context.Context) error
 
-// WorkerRunner executes a WorkFn in a tight loop until ctx is cancelled.
-// It does NOT restart after failure — if you need retry, implement it inside WorkFn.
+// WorkerRunner executes a WorkFn until ctx is cancelled. Errors are reported to
+// the error handler, then retried after a short delay to avoid a tight failure loop.
 type WorkerRunner struct {
 	name    string
 	fn      WorkFn
@@ -52,6 +55,15 @@ func (r *WorkerRunner) Start(ctx context.Context) error {
 		default:
 			if err := r.fn(ctx); err != nil {
 				r.onError(err)
+				timer := time.NewTimer(workerErrorBackoff)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return nil
+				case <-timer.C:
+				}
 			}
 		}
 	}
