@@ -2,7 +2,9 @@ package lane
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -66,7 +68,13 @@ func (l *Lane) Run(ctx context.Context) error {
 
 	for _, r := range l.runners {
 		r := r
-		g.Go(func() error {
+		g.Go(func() (err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					l.log.Error("runner panic", "runner", r.Name(), "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
+					err = fmt.Errorf("runner %q panicked: %v", r.Name(), rec)
+				}
+			}()
 			if err := r.Start(gctx); err != nil {
 				l.log.Error("runner failed", "runner", r.Name(), "error", err)
 				return err
