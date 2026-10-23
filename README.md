@@ -134,7 +134,7 @@ All implementations live in the `runners/` sub-package.
 | HTTP | `runners.NewHTTPRunner(name, server, log)` | Wraps `*http.Server`. Calls `Shutdown` on stop. |
 | HTTPS | `runners.NewHTTPSRunner(name, server, certFile, keyFile, log)` | Same as HTTPRunner with TLS. |
 | Worker | `runners.NewWorkerRunner(name, fn, log)` | Runs a `WorkFn` in a loop until ctx is cancelled. Backs off exponentially (100ms–30s by default) after errors; tune with `WithBackoff(initial, max)` and `WithBackoffJitter()`. |
-| Scheduler | `runners.NewSchedulerRunner(name, interval, fn, log)` | Runs a `JobFn` on a fixed interval. Missed ticks are dropped. |
+| Scheduler | `runners.NewSchedulerRunner(name, interval, fn, log)` | Runs a `JobFn` at a fixed rate, first run after one interval (`WithImmediateRun()` to run at start). Runs never overlap; ticks missed by a slow job are dropped. Job errors are logged (`WithJobErrorHandler`) and scheduling continues. |
 
 ### Worker example
 
