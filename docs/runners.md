@@ -13,6 +13,7 @@ behave. The lifecycle guarantees Lane provides are in
 - [Built-in: HTTPRunner](#httprunner)
 - [Built-in: TCPRunner](#tcprunner)
 - [Built-in: FuncRunner](#funcrunner)
+- [Built-in: Supervisor](#supervisor)
 
 ## The contract
 
@@ -353,6 +354,30 @@ is cancelled (returning earlier means "finished"). `WithStop(fn)` sets what
 l.AddRunner(runners.NewFuncRunner("consumer", func(ctx context.Context) error {
     return client.Consume(ctx, handle) // blocks until ctx is cancelled
 }, runners.WithStop(func(context.Context) error { return client.Close() })))
+```
+
+### Supervisor
+
+`runners.NewSupervisor(r, opts...)` restarts `r` when its `Start` fails,
+instead of letting the failure shut the Lane down
+([ADR 0004](adr/0004-supervision.md)).
+
+- Restarts when `Start` returns an error or panics while the context is live.
+  A nil return or cancellation never restarts.
+- Backoff between attempts: `WithBackoff` / `WithBackoffJitter` (default
+  100ms doubling to 30s). An attempt that ran longer than the cap resets the
+  backoff and the restart count.
+- `WithMaxRestarts(n)` (default unlimited). When exhausted, the last error is
+  returned and Lane handles it as a normal runner failure.
+- `r.Stop` is called once, at shutdown. Between attempts, `Start` must clean
+  up after itself. Only wrap runners whose `Start` can run again
+  (`WorkerRunner`, `SchedulerRunner`, `FuncRunner`, or your own), **not**
+  `HTTPRunner`/`TCPRunner`.
+- `WaitReady` is forwarded. Lane's readiness doesn't change while restarting.
+
+```go
+consumer := runners.NewFuncRunner("consumer", consume)
+l.AddRunner(runners.NewSupervisor(consumer, runners.WithMaxRestarts(5)))
 ```
 
 New built-in runners must meet the criteria in

@@ -177,3 +177,31 @@ func TestIntegration_PortInUseFailsStartup(t *testing.T) {
 		t.Fatalf("final state %v", l.Health().State())
 	}
 }
+
+func TestIntegration_SupervisorKeepsLaneUp(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	l := lane.New(lane.WithLogger(log), lane.WithShutdownTimeout(time.Second))
+
+	var attempts atomic.Int64
+	flaky := runners.NewFuncRunner("flaky", func(ctx context.Context) error {
+		if attempts.Add(1) <= 3 {
+			return errors.New("transient")
+		}
+		<-ctx.Done()
+		return nil
+	})
+	l.AddRunner(runners.NewSupervisor(flaky, runners.WithLogger(log),
+		runners.WithBackoff(time.Millisecond, 5*time.Millisecond)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx) }()
+	eventually(t, "recovered after restarts", func() bool { return attempts.Load() >= 4 })
+	if s := l.Health().State(); s != lane.StateRunning {
+		t.Fatalf("transient failures should not stop the lane: %v", s)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
