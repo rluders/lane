@@ -127,7 +127,7 @@ All implementations live in the `runners/` sub-package.
 |--------|-------------|-------------|
 | HTTP | `runners.NewHTTPRunner(name, server, log)` | Wraps `*http.Server`. Calls `Shutdown` on stop. |
 | HTTPS | `runners.NewHTTPSRunner(name, server, certFile, keyFile, log)` | Same as HTTPRunner with TLS. |
-| Worker | `runners.NewWorkerRunner(name, fn, log)` | Runs a `WorkFn` in a loop until ctx is cancelled. |
+| Worker | `runners.NewWorkerRunner(name, fn, log)` | Runs a `WorkFn` in a loop until ctx is cancelled. Backs off exponentially (100ms–30s) after errors. |
 | Scheduler | `runners.NewSchedulerRunner(name, interval, fn, log)` | Runs a `JobFn` on a fixed interval. Missed ticks are dropped. |
 
 ### Worker example
