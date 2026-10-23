@@ -11,8 +11,9 @@ import "context"
 // Lane down.
 //
 // Stop initiates a graceful shutdown and SHOULD return once it completes; it
-// MUST respect the ctx deadline. Lane calls Stop exactly once per Run, even if
-// Start already returned or failed, and possibly with an expired ctx.
+// MUST respect the ctx deadline. Lane calls Stop exactly once per Run for every
+// runner it started, even if Start already returned or failed, and possibly
+// with an expired ctx.
 type Runner interface {
 	Name() string
 	Start(ctx context.Context) error

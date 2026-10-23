@@ -79,18 +79,22 @@ failures never affect liveness. Transitions not shown above are rejected.
 ## Startup
 
 1. `Run` moves to `Starting` and installs SIGINT/SIGTERM handling.
-2. Every runner's `Start` is called **concurrently** in its own goroutine,
-   with a context derived from `Run`'s `ctx`. There is no startup ordering.
-3. For every runner that implements `Readier`, `WaitReady` is called
-   concurrently (it may run before `Start` has begun).
-4. When every `WaitReady` has returned nil, Lane moves to `Running`.
+2. Runners are started **stage by stage** (see [Stages](#stages)). Within a
+   stage, every runner's `Start` is called **concurrently** in its own
+   goroutine, with a context derived from `Run`'s `ctx`. Without `AddStage`
+   there is a single stage, so everything starts at once.
+3. For every runner in the stage that implements `Readier`, `WaitReady` is
+   called concurrently (it may run before `Start` has begun). The next stage
+   starts once all of them have returned nil.
+4. When the last stage is ready, Lane moves to `Running`.
    Runners that don't implement `Readier` count as ready once launched; with
    none, Lane is `Running` immediately. In that case startup is effectively
    instantaneous, and a `Start` that fails a moment later is a runtime
    failure (Lane may briefly be `Running`). Implement `Readier` on any runner
    whose initialization can fail if you need "never ready on failed startup".
 
-Startup ends early, going straight to `Stopping` without ever being ready, if:
+Startup ends early, going straight to `Stopping` without ever being ready
+(and later stages are never started), if:
 
 - any `Start` or `WaitReady` returns an error or panics (**failure**), or
 - `ctx` is cancelled or a signal arrives (**cancellation**), including a `ctx`
@@ -98,6 +102,29 @@ Startup ends early, going straight to `Stopping` without ever being ready, if:
 
 A `Start` that returns nil during startup just finishes (e.g. a one-shot
 migration); it does not block readiness or trigger shutdown.
+
+### Stages
+
+```go
+l.AddStage(db, cache)   // stage 1
+l.AddStage(api, worker) // stage 2: starts once db and cache are ready
+```
+
+- `AddStage` begins a new stage. `AddRunner` adds to the current (last)
+  stage, creating the first one if needed.
+- A stage starts only when **every runner in all earlier stages is ready**:
+  a `Readier`'s `WaitReady` has returned nil, or a non-`Readier` has been
+  launched. To make a later stage wait for real initialization, implement
+  `Readier` on the earlier runner.
+- If startup fails or is cancelled before a stage starts, that stage's
+  runners are **never started and never stopped**, and no events are emitted
+  for them.
+- Shutdown is the exact reverse of registration: later stages stop first,
+  LIFO within a stage. Stages only add a startup constraint; they don't
+  change shutdown order.
+- Stages are a sequence, not a graph, so there are no dependency names to
+  resolve and cycles are impossible. See
+  [ADR 0002](adr/0002-startup-stages.md).
 
 ## Running
 
@@ -136,9 +163,10 @@ Shutdown begins on the first signal, `ctx` cancellation, or failure:
 
 Guarantees:
 
-- **Every runner receives `Stop` exactly once per `Run`**, including runners
-  whose `Start` already returned or failed, whose `Stop` comes after a failing
-  `Stop`, and those reached after the deadline.
+- **Every started runner receives `Stop` exactly once per `Run`**, including
+  runners whose `Start` already returned or failed, whose `Stop` comes after a
+  failing `Stop`, and those reached after the deadline. Runners in a stage
+  that never started are not stopped.
 - A `Stop` error or panic does not stop the sequence.
 - **Shutdown is bounded by the timeout.** The deadline is shared by all `Stop`
   calls and the wait for `Start`:

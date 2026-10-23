@@ -19,7 +19,7 @@ const defaultShutdownTimeout = 30 * time.Second
 // interception, concurrent startup, health state, and ordered graceful shutdown.
 // Dependency wiring is the caller's responsibility.
 type Lane struct {
-	runners         []Runner
+	stages          [][]Runner
 	shutdownTimeout time.Duration
 	log             *slog.Logger
 	health          *Health
@@ -56,10 +56,40 @@ func New(opts ...Option) *Lane {
 	return l
 }
 
-// AddRunner appends runners. All runners start concurrently; registration
-// order determines the reverse-order (LIFO) shutdown order.
+// AddRunner appends runners to the current (last) stage; see AddStage.
+// Runners in a stage start concurrently. Registration order determines the
+// reverse-order (LIFO) shutdown order.
 func (l *Lane) AddRunner(runners ...Runner) {
-	l.runners = append(l.runners, runners...)
+	if len(runners) == 0 {
+		return
+	}
+	if len(l.stages) == 0 {
+		l.stages = append(l.stages, nil)
+	}
+	last := len(l.stages) - 1
+	l.stages[last] = append(l.stages[last], runners...)
+}
+
+// AddStage starts a new startup stage containing runners. A stage starts only
+// once every runner in the previous stages is ready (see Readier), so a
+// stage's runners may rely on earlier stages being up. Runners within a stage
+// start concurrently. Shutdown is the exact reverse: later stages stop first.
+// If startup fails or is cancelled, later stages are never started (and never
+// stopped). Without AddStage, all runners are in a single stage.
+func (l *Lane) AddStage(runners ...Runner) {
+	if len(runners) == 0 {
+		return
+	}
+	l.stages = append(l.stages, runners)
+}
+
+// runners returns every registered runner in registration order.
+func (l *Lane) runners() []Runner {
+	var all []Runner
+	for _, s := range l.stages {
+		all = append(all, s...)
+	}
+	return all
 }
 
 // Health returns the Lane's lifecycle state and the liveness and readiness
@@ -81,10 +111,11 @@ func (l *Lane) Health() *Health {
 // never becomes ready. Shutdown moves it to Stopping (not ready, still live)
 // and Run's return to Stopped (not live).
 //
-// Every runner receives Stop, even if an earlier Stop failed or the shutdown
-// timeout expired; in the latter case runners get an already-expired ctx and
-// must return promptly. Stop is called on every runner, including those whose
-// Start already returned.
+// Runners start stage by stage (see AddStage). Every started runner receives
+// Stop, even if an earlier Stop failed or the shutdown timeout expired (then
+// with an already-expired ctx, and it must return promptly), including those
+// whose Start already returned. Runners in stages that never started are not
+// stopped.
 //
 // A panic in Start, WaitReady, or Stop is recovered and treated as an error from
 // that method, returned as a *PanicError: in Start or WaitReady it triggers
@@ -129,9 +160,18 @@ func (l *Lane) Run(ctx context.Context) (err error) {
 	defer cancel()
 
 	g, gctx := errgroup.WithContext(ctx)
-	running := newRunningSet(l.runners)
+	running := newRunningSet()
+	all := l.runners()
+	launched := make([]bool, len(all)) // guarded by launchMu until shutdown freezes it
+	var launchMu sync.Mutex
+	frozen := false
 
-	for i, r := range l.runners {
+	// start launches runner i (its index in all). Called with launchMu held,
+	// or before any concurrent launching begins.
+	start := func(i int) {
+		r := all[i]
+		launched[i] = true
+		running.add(i, r.Name())
 		started := time.Now()
 		ev.emit(Event{Kind: EventRunnerStarting, Runner: r.Name(), Time: started})
 		g.Go(func() (err error) {
@@ -151,17 +191,40 @@ func (l *Lane) Run(ctx context.Context) (err error) {
 		})
 	}
 
+	// The first stage always starts. Each later stage starts once every
+	// earlier runner is ready, unless shutdown has begun.
+	if len(l.stages) > 0 {
+		for j := range l.stages[0] {
+			start(j)
+		}
+	}
+
 	readyCh := make(chan struct{})
-	readyID := running.add("readiness check")
+	running.add(readinessID, "readiness check")
 	g.Go(func() error {
-		defer running.done(readyID)
-		if err := l.waitReady(gctx, ev, runStart); err != nil {
-			if gctx.Err() != nil {
-				return nil
+		defer running.done(readinessID)
+		offset := 0
+		for k, stage := range l.stages {
+			if k > 0 {
+				launchMu.Lock()
+				if frozen || gctx.Err() != nil {
+					launchMu.Unlock()
+					return nil // shutdown began; later stages never start
+				}
+				for j := range stage {
+					start(offset + j)
+				}
+				launchMu.Unlock()
 			}
-			l.log.Error("runner readiness failed", "error", err)
-			running.fail(err)
-			return err
+			if err := l.waitReady(gctx, ev, runStart, stage); err != nil {
+				if gctx.Err() != nil {
+					return nil
+				}
+				l.log.Error("runner readiness failed", "error", err)
+				running.fail(err)
+				return err
+			}
+			offset += len(stage)
 		}
 		close(readyCh)
 		return nil
@@ -188,14 +251,20 @@ wait:
 
 	l.health.transition(StateStopping)
 	ev.emit(Event{Kind: EventLaneStopping, Err: running.firstErr()})
+	launchMu.Lock()
+	frozen = true // no further stages start; launched is now stable
+	launchMu.Unlock()
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), l.shutdownTimeout)
 	defer shutdownCancel()
 
 	var stopErrs []error
-	for i := len(l.runners) - 1; i >= 0; i-- {
-		r := l.runners[i]
+	for i := len(all) - 1; i >= 0; i-- {
+		if !launched[i] {
+			continue // its stage never started
+		}
+		r := all[i]
 		ev.emit(Event{Kind: EventRunnerStopping, Runner: r.Name()})
 		stopStart, lateErr := time.Now(), shutdownCtx.Err()
 		err := l.stopRunner(shutdownCtx, r)
@@ -271,27 +340,21 @@ func (l *Lane) stopRunner(ctx context.Context, r Runner) error {
 type runningSet struct {
 	mu      sync.Mutex
 	pending map[int]string
-	next    int
 	first   error
 }
 
-// newRunningSet tracks one entry per runner, keyed by its index.
-func newRunningSet(runners []Runner) *runningSet {
-	s := &runningSet{pending: make(map[int]string, len(runners)), next: len(runners)}
-	for i, r := range runners {
-		s.pending[i] = r.Name()
-	}
-	return s
+// readinessID is the runningSet id of the startup/readiness goroutine.
+const readinessID = -1
+
+func newRunningSet() *runningSet {
+	return &runningSet{pending: make(map[int]string)}
 }
 
-// add tracks an extra goroutine and returns its id.
-func (s *runningSet) add(name string) int {
+// add tracks a goroutine under id (a runner's index, or readinessID).
+func (s *runningSet) add(id int, name string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := s.next
-	s.next++
 	s.pending[id] = name
-	return id
+	s.mu.Unlock()
 }
 
 func (s *runningSet) done(i int) {
@@ -331,9 +394,9 @@ func (s *runningSet) names() []string {
 }
 
 // waitReady blocks until every Readier runner is ready, one fails, or ctx is done.
-func (l *Lane) waitReady(ctx context.Context, ev *emitter, runStart time.Time) error {
+func (l *Lane) waitReady(ctx context.Context, ev *emitter, runStart time.Time, runners []Runner) error {
 	g, gctx := errgroup.WithContext(ctx)
-	for _, r := range l.runners {
+	for _, r := range runners {
 		name := r.Name()
 		rd, ok := r.(Readier)
 		if !ok {

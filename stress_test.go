@@ -82,7 +82,11 @@ func stressOnce(t *testing.T, rng *rand.Rand) {
 			return nil
 		}
 		runners[i] = r
-		l.AddRunner(r)
+		if i > 0 && rng.IntN(3) == 0 {
+			l.AddStage(r) // random stage boundaries
+		} else {
+			l.AddRunner(r)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,12 +109,25 @@ func stressOnce(t *testing.T, rng *rand.Rand) {
 	if s := l.Health().State(); s != StateStopped {
 		t.Fatalf("final state %v", s)
 	}
-	checkEventInvariants(t, events.all(), len(runners))
+	launched := 0
+	for _, r := range runners {
+		if r.started.Load() > 0 {
+			launched++
+		}
+	}
+	checkEventInvariants(t, events.all(), launched)
 
-	// Stop is invoked for every runner exactly once (possibly still running
-	// in the background if it was reached after the deadline).
+	// Stop is invoked exactly once for every runner whose stage started
+	// (possibly still running in the background if reached after the
+	// deadline), and never for the others.
 	deadline := time.Now().Add(time.Second)
 	for _, r := range runners {
+		if r.started.Load() == 0 {
+			if r.stopped.Load() != 0 {
+				t.Fatalf("%s: stopped without being started", r.name)
+			}
+			continue
+		}
 		for r.stopped.Load() == 0 && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}

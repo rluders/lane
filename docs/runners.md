@@ -62,8 +62,8 @@ A short, stable identifier used in logs and errors (`stop <name>: …`,
 - Initiates graceful shutdown and **should return when shutdown is complete**
   or when `ctx` is done, whichever comes first. `ctx` carries the shutdown
   deadline.
-- Called **exactly once per `Run`**, even if `Start` already returned, failed,
-  or never got far. It may also run concurrently with a `Start` that hasn't
+- Called **exactly once per `Run`** for every runner whose `Start` was called,
+  even if `Start` already returned, failed, or never got far. It may also run concurrently with a `Start` that hasn't
   noticed cancellation yet, so it must be safe in every one of those cases.
 - May be called with an already-expired `ctx` (shutdown timeout passed).
   Return immediately.
@@ -198,11 +198,18 @@ func (d *DB) Start(ctx context.Context) error {
 func (d *DB) Stop(ctx context.Context) error { return d.pool.Close() }
 ```
 
-Register the DB before its dependents so that it is stopped **after** them.
+Put the DB in an earlier stage than its dependents. They then start only
+after it is ready, and are stopped before it:
+
+```go
+l.AddStage(db)
+l.AddStage(api, consumer)
+```
 
 A pure one-shot task (e.g. a migration) can return nil from `Start` once it's
-done. Lane keeps running the others. If later runners need it to finish first,
-run it before `Lane.Run` instead: Lane has no startup ordering.
+done. Lane keeps running the others. If later runners need it to finish
+first, give it a `WaitReady` that returns once the migration completes and
+put it in an earlier stage, or run it before `Lane.Run`.
 
 ## Common mistakes
 
@@ -219,8 +226,8 @@ run it before `Lane.Run` instead: Lane has no startup ordering.
   an already-closed channel).
 - **Unprotected background goroutines.** A panic there crashes the process;
   use `lane.Go`.
-- **Relying on startup order.** Starts are concurrent. Use `WaitReady`, or run
-  prerequisites before `Lane.Run`.
+- **Relying on registration order for startup.** Runners within a stage start
+  concurrently. Use `AddStage` plus `WaitReady` for "start B after A is up".
 
 ## Testing a Runner
 
