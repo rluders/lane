@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -255,7 +256,27 @@ func TestLane_StopContinuesAfterShutdownTimeout(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("shutdown took %v, want bounded by timeout", d)
 	}
+	// alpha is reached after the deadline: it still gets Stop, but Run does
+	// not wait for it.
+	waitStopped(t, &mu, &stopOrder, 2)
 	assertStopOrder(t, &mu, stopOrder, "beta", "alpha")
+}
+
+func waitStopped(t *testing.T, mu *sync.Mutex, stopOrder *[]string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		got := len(*stopOrder)
+		mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d runners received Stop", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestLane_StartAndStopErrorsAreJoined(t *testing.T) {
@@ -568,4 +589,107 @@ func TestLane_PanicAtRuntimeTriggersShutdown(t *testing.T) {
 		t.Fatal("still ready after runtime panic")
 	}
 	assertStopOrder(t, &mu, stopOrder, "bad", "ok")
+}
+
+// stuckRunner ignores its contexts: Start ignores cancellation (if stuckStart)
+// and Stop ignores its deadline (if stuckStop). Both unblock on release.
+type stuckRunner struct {
+	*fakeRunner
+	stuckStart, stuckStop bool
+	release               chan struct{}
+}
+
+func newStuck(t *testing.T, name string, stopOrder *[]string, mu *sync.Mutex) *stuckRunner {
+	s := &stuckRunner{fakeRunner: newFake(name, stopOrder, mu), release: make(chan struct{})}
+	t.Cleanup(func() { close(s.release) })
+	return s
+}
+
+func (s *stuckRunner) Start(ctx context.Context) error {
+	if s.stuckStart {
+		<-s.release
+		return nil
+	}
+	return s.fakeRunner.Start(ctx)
+}
+
+func (s *stuckRunner) Stop(ctx context.Context) error {
+	if s.stuckStop {
+		s.mu.Lock()
+		*s.stopOrder = append(*s.stopOrder, s.name)
+		s.mu.Unlock()
+		<-s.release
+		return nil
+	}
+	return s.fakeRunner.Stop(ctx)
+}
+
+func TestLane_StopIgnoringDeadlineDoesNotBlock(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+
+	var stopOrder []string
+	var mu sync.Mutex
+
+	a := newFake("alpha", &stopOrder, &mu)
+	b := newStuck(t, "beta", &stopOrder, &mu)
+	b.stuckStop = true
+	l.AddRunner(a, b)
+
+	start := time.Now()
+	err := runUntilCancelled(t, l, 2*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("shutdown took %v, want bounded by timeout", d)
+	}
+	waitStopped(t, &mu, &stopOrder, 2)
+	assertStopOrder(t, &mu, stopOrder, "beta", "alpha")
+}
+
+func TestLane_StartIgnoringCancellationDoesNotBlock(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+
+	var stopOrder []string
+	var mu sync.Mutex
+
+	a := newFake("alpha", &stopOrder, &mu)
+	b := newStuck(t, "beta", &stopOrder, &mu)
+	b.stuckStart = true
+	l.AddRunner(a, b)
+
+	start := time.Now()
+	err := runUntilCancelled(t, l, 2*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "beta") || strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("error should name only the stuck runner: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("shutdown took %v, want bounded by timeout", d)
+	}
+}
+
+func TestLane_TimeoutKeepsFirstRunnerError(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+
+	var stopOrder []string
+	var mu sync.Mutex
+
+	errStart := errors.New("start failed")
+	a := newFake("alpha", &stopOrder, &mu)
+	a.startErr = errStart
+	b := newStuck(t, "beta", &stopOrder, &mu)
+	b.stuckStart = true
+	l.AddRunner(a, b)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	if !errors.Is(err, errStart) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected start error and deadline exceeded, got %v", err)
+	}
 }
