@@ -32,6 +32,9 @@ type options struct {
 
 	// FuncRunner
 	stop func(ctx context.Context) error
+
+	// Supervisor
+	maxRestarts int
 }
 
 func newOptions(opts []Option) options {
@@ -62,7 +65,7 @@ func WithErrorHandler(fn func(err error)) Option {
 	return func(o *options) { o.onError = fn }
 }
 
-// WithBackoff sets WorkerRunner's delay after the first consecutive failure
+// WithBackoff sets WorkerRunner's (and Supervisor's restart) delay after the first consecutive failure
 // (initial) and the cap it doubles up to (limit). Values <= 0 keep the
 // default; limit is raised to initial if smaller.
 func WithBackoff(initial, limit time.Duration) Option {
@@ -99,4 +102,10 @@ func WithTLS(certFile, keyFile string) Option {
 // WithStop sets the function FuncRunner calls from Stop.
 func WithStop(fn func(ctx context.Context) error) Option {
 	return func(o *options) { o.stop = fn }
+}
+
+// WithMaxRestarts limits how many consecutive restarts a Supervisor attempts
+// before returning the error (default 0: unlimited).
+func WithMaxRestarts(n int) Option {
+	return func(o *options) { o.maxRestarts = max(n, 0) }
 }

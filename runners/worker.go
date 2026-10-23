@@ -83,7 +83,13 @@ func (r *WorkerRunner) Start(ctx context.Context) error {
 
 // delay returns the wait for the given backoff, applying jitter if enabled.
 func (r *WorkerRunner) delay(backoff time.Duration) time.Duration {
-	if !r.jitter {
+	return jittered(backoff, r.jitter)
+}
+
+// jittered returns backoff, or a random duration in [backoff/2, backoff] if
+// jitter is enabled.
+func jittered(backoff time.Duration, jitter bool) time.Duration {
+	if !jitter {
 		return backoff
 	}
 	half := backoff / 2

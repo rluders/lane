@@ -30,8 +30,9 @@ This is the authoritative description of what `lane` guarantees. The godoc on
 - **Bounded and predictable.** Shutdown order is fixed, shutdown time is
   bounded, and every behavior below is deterministic except where noted as
   concurrent.
-- **No hidden recovery.** Lane never restarts a runner or retries an
-  operation. Restart, retry and dependency policies belong to the application.
+- **No hidden recovery.** The core never restarts a runner or retries an
+  operation. Restarts are opt-in and explicit at the registration site
+  (`runners.NewSupervisor`); other retry policies belong to the application.
 
 ## Responsibilities
 
