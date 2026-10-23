@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -72,9 +75,18 @@ func (l *Lane) Health() *HealthState {
 // shutdown, in Stop the remaining runners are still stopped. Panics in
 // goroutines a runner spawns itself are not recovered; use Go for those.
 //
+// Shutdown is bounded by the shutdown timeout, shared by all Stop calls and
+// the wait for Start to return. A Stop that outlives the deadline is recorded
+// as context.DeadlineExceeded and Lane moves on. Runners reached after the
+// deadline still receive Stop (with the expired ctx), but Lane does not wait
+// for them and their result is only logged. If any Start has not returned by
+// the deadline, Run returns without waiting for it and reports which runners
+// were still running. Such runners are leaked, not killed.
+//
 // Returns nil on clean shutdown. Otherwise returns the first runner error
-// joined (errors.Join) with every Stop error, in stop order. If several
-// runners fail concurrently, only the first error is returned; all are logged.
+// joined (errors.Join) with every Stop error, in stop order, and any shutdown
+// timeout error. If several runners fail concurrently, only the first error is
+// returned; all are logged.
 func (l *Lane) Run(ctx context.Context) error {
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
@@ -83,12 +95,14 @@ func (l *Lane) Run(ctx context.Context) error {
 	defer cancel()
 
 	g, gctx := errgroup.WithContext(ctx)
+	running := newRunningSet(l.runners)
 
-	for _, r := range l.runners {
-		r := r
+	for i, r := range l.runners {
 		g.Go(func() error {
+			defer running.done(i)
 			if err := callRunner(l.log, r.Name(), "start", func() error { return r.Start(gctx) }); err != nil {
 				l.log.Error("runner failed", "runner", r.Name(), "error", err)
+				running.fail(err)
 				return err
 			}
 			return nil
@@ -96,12 +110,15 @@ func (l *Lane) Run(ctx context.Context) error {
 	}
 
 	readyCh := make(chan struct{})
+	readyID := running.add("readiness check")
 	g.Go(func() error {
+		defer running.done(readyID)
 		if err := l.waitReady(gctx); err != nil {
 			if gctx.Err() != nil {
 				return nil
 			}
 			l.log.Error("runner readiness failed", "error", err)
+			running.fail(err)
 			return err
 		}
 		close(readyCh)
@@ -135,13 +152,125 @@ wait:
 	var stopErrs []error
 	for i := len(l.runners) - 1; i >= 0; i-- {
 		r := l.runners[i]
-		if err := callRunner(l.log, r.Name(), "stop", func() error { return r.Stop(shutdownCtx) }); err != nil {
+		if err := l.stopRunner(shutdownCtx, r); err != nil {
 			l.log.Error("runner stop error", "runner", r.Name(), "error", err)
 			stopErrs = append(stopErrs, fmt.Errorf("stop %s: %w", r.Name(), err))
 		}
 	}
 
-	return errors.Join(append([]error{g.Wait()}, stopErrs...)...)
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- g.Wait() }()
+
+	var runErr error
+	select {
+	case runErr = <-waitCh:
+	case <-shutdownCtx.Done():
+		names := running.names()
+		if len(names) == 0 {
+			// Everything exited right at the deadline; g.Wait returns at once.
+			runErr = <-waitCh
+			break
+		}
+		l.log.Error("runners did not exit before shutdown timeout", "runners", names)
+		runErr = errors.Join(running.firstErr(),
+			fmt.Errorf("runners did not exit before shutdown timeout (%s): %w",
+				strings.Join(names, ", "), shutdownCtx.Err()))
+	}
+
+	return errors.Join(append([]error{runErr}, stopErrs...)...)
+}
+
+// stopRunner calls r.Stop and returns once it does or ctx is done, whichever
+// comes first. A Stop that ignores ctx keeps running in the background. If ctx
+// has already expired, Stop is called without waiting and nil is returned.
+func (l *Lane) stopRunner(ctx context.Context, r Runner) error {
+	expired := ctx.Err() != nil
+	done := make(chan error, 1)
+	go func() {
+		err := callRunner(l.log, r.Name(), "stop", func() error { return r.Stop(ctx) })
+		if expired && err != nil {
+			l.log.Error("runner stop error after shutdown timeout", "runner", r.Name(), "error", err)
+		}
+		done <- err
+	}()
+	if expired {
+		return nil
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		select {
+		case err := <-done: // Stop finished at the deadline; prefer its result
+			return err
+		default:
+			return ctx.Err()
+		}
+	}
+}
+
+// runningSet tracks which runners' Start has not yet returned, and the first
+// Start error, so Run can report them if shutdown times out.
+type runningSet struct {
+	mu      sync.Mutex
+	pending map[int]string
+	next    int
+	first   error
+}
+
+// newRunningSet tracks one entry per runner, keyed by its index.
+func newRunningSet(runners []Runner) *runningSet {
+	s := &runningSet{pending: make(map[int]string, len(runners)), next: len(runners)}
+	for i, r := range runners {
+		s.pending[i] = r.Name()
+	}
+	return s
+}
+
+// add tracks an extra goroutine and returns its id.
+func (s *runningSet) add(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.next
+	s.next++
+	s.pending[id] = name
+	return id
+}
+
+func (s *runningSet) done(i int) {
+	s.mu.Lock()
+	delete(s.pending, i)
+	s.mu.Unlock()
+}
+
+func (s *runningSet) fail(err error) {
+	s.mu.Lock()
+	if s.first == nil {
+		s.first = err
+	}
+	s.mu.Unlock()
+}
+
+func (s *runningSet) firstErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.first
+}
+
+// names returns the pending runner names in registration order.
+func (s *runningSet) names() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := make([]int, 0, len(s.pending))
+	for i := range s.pending {
+		idx = append(idx, i)
+	}
+	slices.Sort(idx)
+	out := make([]string, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, s.pending[i])
+	}
+	return out
 }
 
 // waitReady blocks until every Readier runner is ready, one fails, or ctx is done.

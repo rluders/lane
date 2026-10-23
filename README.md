@@ -122,6 +122,7 @@ type Runner interface {
 - A panic in `Start`, `Ready`, or `Stop` is recovered, logged with its stack trace, and treated as an error from that method (`*lane.PanicError`). Goroutines a runner spawns itself are not covered — use `lane.Go`
 - Optionally implement `lane.Readier` (`Ready(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
 - Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
+- Shutdown is bounded by the shutdown timeout: lane never waits past it for a `Stop` or `Start` that ignores its context. Such runners are reported in the returned error (`context.DeadlineExceeded`) and left running
 - `Run` returns the first runner error joined with all `Stop` errors (use `errors.Is` to inspect)
 
 ## 📦 Built-in Runners
