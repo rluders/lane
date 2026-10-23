@@ -224,6 +224,14 @@ Avoid it if you need:
 - ❌ A full application framework with routing conventions
 - ❌ Managed configuration, observability, or deployment tooling
 
+## 🧪 Development
+
+CI runs the full test suite with the race detector on every push and pull request. Run the same check locally before opening a PR:
+
+```sh
+go test -race ./...
+```
+
 ## 📄 License
 
 MIT — see [LICENSE](LICENSE).
