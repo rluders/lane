@@ -68,7 +68,11 @@ func (l *Lane) Health() *Health {
 }
 
 // Run starts all runners concurrently, blocks until a signal or runner failure,
-// then shuts down runners in reverse registration order.
+// then shuts down runners in reverse registration order. The full contract is
+// in docs/lifecycle.md.
+//
+// Run must not be called concurrently on the same Lane; it may be called again
+// after it returns, which calls every runner's Start and Stop again.
 //
 // Health (see State) moves Starting → Running once every runner implementing
 // Readier reports ready; a WaitReady error is treated like a runner failure. If a
@@ -95,7 +99,7 @@ func (l *Lane) Health() *Health {
 // were still running. Such runners are leaked, not killed.
 //
 // Cancellation vs. failure: cancelling ctx (or a SIGINT/SIGTERM) is an
-// intentional shutdown. Any non-nil error from Start or Ready is a runner
+// intentional shutdown. Any non-nil error from Start or WaitReady is a runner
 // failure, including context.Canceled or context.DeadlineExceeded returned
 // while Lane is still running. Once shutdown has begun (ctx cancelled, signal,
 // or another runner failed), a Start that returns context.Canceled or
