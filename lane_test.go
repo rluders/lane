@@ -115,7 +115,7 @@ func TestLane_HealthTransitions(t *testing.T) {
 	r := newFake("solo", &stopOrder, &mu)
 	l.AddRunner(r)
 
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("should not be ready before Run")
 	}
 
@@ -124,7 +124,7 @@ func TestLane_HealthTransitions(t *testing.T) {
 	go func() { done <- l.Run(ctx) }()
 
 	time.Sleep(50 * time.Millisecond)
-	if !l.Health().IsReady() {
+	if !l.Health().Ready() {
 		t.Fatal("should be ready after runners started")
 	}
 
@@ -136,7 +136,7 @@ func TestLane_HealthTransitions(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("should not be ready after shutdown")
 	}
 }
@@ -344,7 +344,7 @@ func waitRun(t *testing.T, done <-chan error) error {
 func waitReady(t *testing.T, l *Lane) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
-	for !l.Health().IsReady() {
+	for !l.Health().Ready() {
 		if time.Now().After(deadline) {
 			t.Fatal("lane did not become ready")
 		}
@@ -366,13 +366,13 @@ func TestLane_ReadyWaitsForAllReadiers(t *testing.T) {
 	defer cancel()
 
 	time.Sleep(50 * time.Millisecond)
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready before any Readier reported ready")
 	}
 
 	close(a.ready)
 	time.Sleep(50 * time.Millisecond)
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready before all Readiers reported ready")
 	}
 
@@ -383,7 +383,7 @@ func TestLane_ReadyWaitsForAllReadiers(t *testing.T) {
 	if err := waitRun(t, done); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("still ready after shutdown")
 	}
 }
@@ -404,7 +404,7 @@ func TestLane_ReadyErrorFailsRun(t *testing.T) {
 	if !errors.Is(err, errNotReady) {
 		t.Fatalf("expected readiness error, got %v", err)
 	}
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready after readiness failure")
 	}
 	assertStopOrder(t, &mu, stopOrder, "broker", "other")
@@ -429,7 +429,7 @@ func TestLane_StartFailureBeforeReadyPreventsReady(t *testing.T) {
 	if errors.Is(err, context.Canceled) {
 		t.Fatalf("readiness cancellation leaked into result: %v", err)
 	}
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready after startup failure")
 	}
 }
@@ -449,7 +449,7 @@ func TestLane_CancelDuringStartupPreventsReady(t *testing.T) {
 	if err := waitRun(t, done); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready after cancellation during startup")
 	}
 }
@@ -505,7 +505,7 @@ func TestLane_PanicInStartTriggersShutdown(t *testing.T) {
 	_, done := startLane(l)
 	err := waitRun(t, done)
 	assertPanicError(t, err, "bad", "start")
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready after panic in start")
 	}
 	assertStopOrder(t, &mu, stopOrder, "bad", "ok")
@@ -537,7 +537,7 @@ func TestLane_PanicInReadyTriggersShutdown(t *testing.T) {
 	_, done := startLane(l)
 	err := waitRun(t, done)
 	assertPanicError(t, err, "bad", "ready")
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("ready after panic in ready")
 	}
 }
@@ -586,7 +586,7 @@ func TestLane_PanicAtRuntimeTriggersShutdown(t *testing.T) {
 
 	err := waitRun(t, done)
 	assertPanicError(t, err, "bad", "start")
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("still ready after runtime panic")
 	}
 	assertStopOrder(t, &mu, stopOrder, "bad", "ok")
@@ -802,7 +802,7 @@ func TestLane_RunnerReturningNilEarlyKeepsLaneRunning(t *testing.T) {
 		t.Fatalf("Run returned early (%v) after a runner finished cleanly", err)
 	default:
 	}
-	if !l.Health().IsReady() {
+	if !l.Health().Ready() {
 		t.Fatal("not ready after a runner finished cleanly")
 	}
 
@@ -817,3 +817,101 @@ func TestLane_RunnerReturningNilEarlyKeepsLaneRunning(t *testing.T) {
 type nilStarter struct{ *fakeRunner }
 
 func (n *nilStarter) Start(context.Context) error { return nil }
+
+// stateRecorder records the Lane's health while being stopped.
+type stateRecorder struct {
+	*fakeRunner
+	l         *Lane
+	stopState State
+	stopLive  bool
+	stopReady bool
+}
+
+func (s *stateRecorder) Stop(ctx context.Context) error {
+	h := s.l.Health()
+	s.stopState, s.stopLive, s.stopReady = h.State(), h.Live(), h.Ready()
+	return s.fakeRunner.Stop(ctx)
+}
+
+func TestLane_HealthStatesThroughLifecycle(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	rd := newReadyFake("http", &stopOrder, &mu)
+	rec := &stateRecorder{fakeRunner: newFake("rec", &stopOrder, &mu), l: l}
+	l.AddRunner(rec, rd)
+
+	if s := l.Health().State(); s != StateStarting || !l.Health().Live() {
+		t.Fatalf("before Run: %v live=%v", s, l.Health().Live())
+	}
+
+	cancel, done := startLane(l)
+	time.Sleep(30 * time.Millisecond)
+	if s := l.Health().State(); s != StateStarting || l.Health().Ready() {
+		t.Fatalf("while starting: %v ready=%v", s, l.Health().Ready())
+	}
+
+	close(rd.ready)
+	waitReady(t, l)
+	if l.Health().State() != StateRunning || !l.Health().Live() {
+		t.Fatalf("running: %v live=%v", l.Health().State(), l.Health().Live())
+	}
+
+	cancel()
+	if err := waitRun(t, done); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.stopState != StateStopping || !rec.stopLive || rec.stopReady {
+		t.Fatalf("during shutdown: %v live=%v ready=%v", rec.stopState, rec.stopLive, rec.stopReady)
+	}
+	if s := l.Health().State(); s != StateStopped || l.Health().Live() || l.Health().Ready() {
+		t.Fatalf("after Run: %v live=%v ready=%v", s, l.Health().Live(), l.Health().Ready())
+	}
+}
+
+func TestLane_HealthStartupFailureSkipsRunning(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	failing := newFake("db", &stopOrder, &mu)
+	failing.startErr = errors.New("boom")
+	rec := &stateRecorder{fakeRunner: newFake("rec", &stopOrder, &mu), l: l}
+	l.AddRunner(rec, failing)
+
+	_, done := startLane(l)
+	if err := waitRun(t, done); err == nil {
+		t.Fatal("expected error")
+	}
+	if rec.stopState != StateStopping || rec.stopReady {
+		t.Fatalf("during shutdown: %v ready=%v", rec.stopState, rec.stopReady)
+	}
+	if l.Health().State() != StateStopped {
+		t.Fatalf("after Run: %v", l.Health().State())
+	}
+}
+
+// reusableRunner blocks until cancelled and can be stopped any number of times.
+type reusableRunner struct{}
+
+func (reusableRunner) Name() string                    { return "reusable" }
+func (reusableRunner) Start(ctx context.Context) error { <-ctx.Done(); return nil }
+func (reusableRunner) Stop(context.Context) error      { return nil }
+
+func TestLane_RunAgainResetsHealth(t *testing.T) {
+	l, _ := newTestLane()
+	l.AddRunner(reusableRunner{})
+
+	for i := range 2 {
+		cancel, done := startLane(l)
+		waitReady(t, l)
+		cancel()
+		if err := waitRun(t, done); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		if l.Health().State() != StateStopped {
+			t.Fatalf("run %d: ended in %v", i, l.Health().State())
+		}
+	}
+}

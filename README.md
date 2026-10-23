@@ -69,7 +69,7 @@ import (
 )
 
 func main() {
-    lane.RunHealthCheck(":8080", lane.WithHealthPath("/live"))
+    lane.RunHealthCheck(":8080")
 
     log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -78,7 +78,7 @@ func main() {
     l := lane.New(log, lane.WithShutdownTimeout(10*time.Second))
 
     mux.Handle("GET /ready", lane.ReadinessHandler(l.Health()))
-    mux.Handle("GET /live", lane.LivenessHandler())
+    mux.Handle("GET /live", lane.LivenessHandler(l.Health()))
 
     server := &http.Server{Addr: ":8080", Handler: mux}
     l.AddRunner(runners.NewHTTPRunner("api", server, log))
@@ -98,15 +98,15 @@ flowchart TD
     B --> C[l.Run]
     C --> D[Start all runners concurrently]
     D --> E[Wait for Readier runners]
-    E --> E2[health.SetReady true]
+    E --> E2[State: Running]
     E2 --> F{waiting}
     F -- SIGINT/SIGTERM --> G[Signal received]
     F -- runner error --> H[Context cancelled]
-    G --> I[health.SetReady false]
+    G --> I[State: Stopping]
     H --> I
     I --> J[Stop runners in LIFO order]
     J --> K[Shutdown timeout context]
-    K --> L[Return first error or nil]
+    K --> L[State: Stopped, return first error or nil]
 ```
 
 Runners are started concurrently. Shutdown is sequential in **reverse registration order** (LIFO), so dependents stop before the services they depend on.
@@ -164,16 +164,26 @@ l.AddRunner(sched)
 
 ## 🏥 Health Checks
 
-`HealthState` tracks readiness. Lane sets it to ready once every runner implementing `Readier` reports ready (never if a runner fails or the context is cancelled first), and back to not-ready at the beginning of shutdown.
+`l.Health()` exposes the lane's lifecycle state and the liveness and readiness derived from it. The model has no HTTP dependency; the handlers below are thin adapters over it.
+
+| State | When | Live | Ready |
+|-------|------|------|-------|
+| `Starting` | From `New` until every `Readier` runner is ready | ✅ | ❌ |
+| `Running` | Until shutdown begins | ✅ | ✅ |
+| `Stopping` | Signal, context cancellation, or runner failure; runners are being stopped. A failure during startup goes here directly, skipping `Running` | ✅ | ❌ |
+| `Stopped` | `Run` has returned | ❌ | ❌ |
 
 ```go
+h := l.Health()
+h.State() // lane.StateRunning
+h.Live()  // true
+h.Ready() // true
+
 mux.Handle("GET /ready", lane.ReadinessHandler(l.Health(), db.PingContext))
-mux.Handle("GET /live", lane.LivenessHandler())
+mux.Handle("GET /live", lane.LivenessHandler(l.Health()))
 ```
 
-`ReadinessHandler` accepts zero or more probe functions of type `func(ctx context.Context) error`. All probes must pass for the endpoint to return 200. If any probe fails, the endpoint returns 503.
-
-`LivenessHandler` always returns 200 — a running process is a live process.
+`ReadinessHandler` returns 200 while the lane is `Running` and all probe functions (`func(ctx context.Context) error`) pass, 503 otherwise. `LivenessHandler` returns 200 until the lane is `Stopped`. Both respond with JSON `{"status": ..., "state": ...}`.
 
 ### Container health probe
 
@@ -181,7 +191,7 @@ Call `RunHealthCheck` at the very top of `main()` to support Docker `HEALTHCHECK
 
 ```go
 func main() {
-    lane.RunHealthCheck(":8080", lane.WithHealthPath("/live"))
+    lane.RunHealthCheck(":8080")
     // ... rest of main
 }
 ```
@@ -191,7 +201,7 @@ When invoked as `myservice healthcheck`, the process sends `GET` to the endpoint
 | Option | Default | Description |
 |--------|---------|-------------|
 | `addr` (argument) | — | `":port"` (localhost assumed) or `"host:port"` |
-| `WithHealthPath(path)` | `"/health"` | Request path |
+| `WithHealthPath(path)` | `"/live"` | Request path |
 | `WithHealthTimeout(d)` | `5s` | Bound on the whole request |
 | `WithExpectedStatus(code)` | `200` | Status treated as healthy |
 
