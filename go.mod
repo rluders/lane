@@ -1,4 +1,4 @@
-module github.com/rluders/lane
+module github.com/rluders/lane/v2
 
 go 1.26
 
