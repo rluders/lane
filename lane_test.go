@@ -276,3 +276,158 @@ func TestLane_StartAndStopErrorsAreJoined(t *testing.T) {
 		t.Fatalf("expected start and stop errors, got %v", err)
 	}
 }
+
+// readyRunner is a fakeRunner that also implements Readier.
+type readyRunner struct {
+	*fakeRunner
+	ready    chan struct{} // Ready returns nil once closed
+	readyErr error
+}
+
+func newReadyFake(name string, stopOrder *[]string, mu *sync.Mutex) *readyRunner {
+	return &readyRunner{fakeRunner: newFake(name, stopOrder, mu), ready: make(chan struct{})}
+}
+
+func (r *readyRunner) Ready(ctx context.Context) error {
+	if r.readyErr != nil {
+		return r.readyErr
+	}
+	select {
+	case <-r.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// startLane runs l in the background and returns a cancel func and Run's result channel.
+func startLane(l *Lane) (context.CancelFunc, <-chan error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx) }()
+	return cancel, done
+}
+
+func waitRun(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatal("l.Run did not return in time")
+		return nil
+	}
+}
+
+func waitReady(t *testing.T, l *Lane) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !l.Health().IsReady() {
+		if time.Now().After(deadline) {
+			t.Fatal("lane did not become ready")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestLane_ReadyWaitsForAllReadiers(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	plain := newFake("plain", &stopOrder, &mu)
+	a := newReadyFake("a", &stopOrder, &mu)
+	b := newReadyFake("b", &stopOrder, &mu)
+	l.AddRunner(plain, a, b)
+
+	cancel, done := startLane(l)
+	defer cancel()
+
+	time.Sleep(50 * time.Millisecond)
+	if l.Health().IsReady() {
+		t.Fatal("ready before any Readier reported ready")
+	}
+
+	close(a.ready)
+	time.Sleep(50 * time.Millisecond)
+	if l.Health().IsReady() {
+		t.Fatal("ready before all Readiers reported ready")
+	}
+
+	close(b.ready)
+	waitReady(t, l)
+
+	cancel()
+	if err := waitRun(t, done); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if l.Health().IsReady() {
+		t.Fatal("still ready after shutdown")
+	}
+}
+
+func TestLane_ReadyErrorFailsRun(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	errNotReady := errors.New("broker unreachable")
+	r := newReadyFake("broker", &stopOrder, &mu)
+	r.readyErr = errNotReady
+	other := newFake("other", &stopOrder, &mu)
+	l.AddRunner(other, r)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	if !errors.Is(err, errNotReady) {
+		t.Fatalf("expected readiness error, got %v", err)
+	}
+	if l.Health().IsReady() {
+		t.Fatal("ready after readiness failure")
+	}
+	assertStopOrder(t, &mu, stopOrder, "broker", "other")
+}
+
+func TestLane_StartFailureBeforeReadyPreventsReady(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	errStart := errors.New("db start failed")
+	failing := newFake("db", &stopOrder, &mu)
+	failing.startErr = errStart
+	pending := newReadyFake("http", &stopOrder, &mu) // never becomes ready
+	l.AddRunner(failing, pending)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	if !errors.Is(err, errStart) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("readiness cancellation leaked into result: %v", err)
+	}
+	if l.Health().IsReady() {
+		t.Fatal("ready after startup failure")
+	}
+}
+
+func TestLane_CancelDuringStartupPreventsReady(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	pending := newReadyFake("http", &stopOrder, &mu) // never becomes ready
+	l.AddRunner(pending)
+
+	cancel, done := startLane(l)
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	if err := waitRun(t, done); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if l.Health().IsReady() {
+		t.Fatal("ready after cancellation during startup")
+	}
+}

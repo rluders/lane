@@ -57,6 +57,11 @@ func (l *Lane) Health() *HealthState {
 // Run starts all runners concurrently, blocks until a signal or runner failure,
 // then shuts down runners in reverse registration order.
 //
+// Lane becomes ready once every runner implementing Readier reports ready. A
+// Ready error is treated like a runner failure. Lane never becomes ready if a
+// runner fails or ctx is cancelled first, and is marked not ready as soon as
+// shutdown begins.
+//
 // Every runner receives Stop, even if an earlier Stop failed or the shutdown
 // timeout expired; in the latter case runners get an already-expired ctx and
 // must return promptly. Stop is called on every runner, including those whose
@@ -84,12 +89,35 @@ func (l *Lane) Run(ctx context.Context) error {
 		})
 	}
 
-	l.health.SetReady(true)
+	readyCh := make(chan struct{})
+	g.Go(func() error {
+		if err := l.waitReady(gctx); err != nil {
+			if gctx.Err() != nil {
+				return nil
+			}
+			l.log.Error("runner readiness failed", "error", err)
+			return err
+		}
+		close(readyCh)
+		return nil
+	})
 
-	select {
-	case <-sigCh:
-	case <-gctx.Done():
-		l.log.Warn("runner context cancelled, initiating shutdown")
+	// SetReady(true) happens on this goroutine, so it can never race with the
+	// SetReady(false) below.
+wait:
+	for {
+		select {
+		case <-readyCh:
+			readyCh = nil
+			if gctx.Err() == nil {
+				l.health.SetReady(true)
+			}
+		case <-sigCh:
+			break wait
+		case <-gctx.Done():
+			l.log.Warn("runner context cancelled, initiating shutdown")
+			break wait
+		}
 	}
 
 	l.health.SetReady(false)
@@ -108,4 +136,23 @@ func (l *Lane) Run(ctx context.Context) error {
 	}
 
 	return errors.Join(append([]error{g.Wait()}, stopErrs...)...)
+}
+
+// waitReady blocks until every Readier runner is ready, one fails, or ctx is done.
+func (l *Lane) waitReady(ctx context.Context) error {
+	g, gctx := errgroup.WithContext(ctx)
+	for _, r := range l.runners {
+		rd, ok := r.(Readier)
+		if !ok {
+			continue
+		}
+		name := r.Name()
+		g.Go(func() error {
+			if err := rd.Ready(gctx); err != nil {
+				return fmt.Errorf("ready %s: %w", name, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
 }

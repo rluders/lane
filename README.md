@@ -89,8 +89,9 @@ flowchart TD
     A[lane.New] --> B[AddRunner x N]
     B --> C[l.Run]
     C --> D[Start all runners concurrently]
-    D --> E[health.SetReady true]
-    E --> F{waiting}
+    D --> E[Wait for Readier runners]
+    E --> E2[health.SetReady true]
+    E2 --> F{waiting}
     F -- SIGINT/SIGTERM --> G[Signal received]
     F -- runner error --> H[Context cancelled]
     G --> I[health.SetReady false]
@@ -118,6 +119,7 @@ type Runner interface {
 - `Start` **must block** until the runner stops or fails
 - `Stop` initiates graceful shutdown and **must respect the context deadline**
 - If `Start` returns a non-nil error, lane cancels all other runners
+- Optionally implement `lane.Readier` (`Ready(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
 - Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
 - `Run` returns the first runner error joined with all `Stop` errors (use `errors.Is` to inspect)
 
@@ -152,7 +154,7 @@ l.AddRunner(sched)
 
 ## 🏥 Health Checks
 
-`HealthState` tracks readiness. Lane sets it to ready after all runners start, and back to not-ready at the beginning of shutdown.
+`HealthState` tracks readiness. Lane sets it to ready once every runner implementing `Readier` reports ready (never if a runner fails or the context is cancelled first), and back to not-ready at the beginning of shutdown.
 
 ```go
 mux.Handle("GET /ready", lane.ReadinessHandler(l.Health(), db.PingContext))
