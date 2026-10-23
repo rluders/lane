@@ -155,3 +155,68 @@ func TestWorker_NoErrorReportedOnShutdown(t *testing.T) {
 		t.Fatalf("onError called %d times on shutdown", n)
 	}
 }
+
+func TestWithBackoff(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	noop := func(context.Context) error { return nil }
+
+	tests := []struct {
+		name         string
+		initial, max time.Duration
+		wantBase     time.Duration
+		wantMax      time.Duration
+	}{
+		{"custom", 50 * time.Millisecond, 5 * time.Second, 50 * time.Millisecond, 5 * time.Second},
+		{"zero keeps defaults", 0, 0, defaultWorkerBaseBackoff, defaultWorkerMaxBackoff},
+		{"max below initial is raised", time.Minute, time.Second, time.Minute, time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWorkerRunner("w", noop, log, WithBackoff(tt.initial, tt.max))
+			if w.baseBackoff != tt.wantBase || w.maxBackoff != tt.wantMax {
+				t.Fatalf("got base=%v max=%v, want base=%v max=%v", w.baseBackoff, w.maxBackoff, tt.wantBase, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestWithBackoff_AppliesToStart(t *testing.T) {
+	var calls atomic.Int64
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	w := NewWorkerRunner("w", func(ctx context.Context) error {
+		calls.Add(1)
+		return errWork
+	}, log, WithBackoff(time.Hour, time.Hour))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("Start returned %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("expected 1 call within the configured backoff, got %d", n)
+	}
+}
+
+func TestBackoffJitter(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	noop := func(context.Context) error { return nil }
+
+	plain := NewWorkerRunner("w", noop, log)
+	if d := plain.delay(time.Second); d != time.Second {
+		t.Fatalf("without jitter: got %v, want 1s", d)
+	}
+
+	jittered := NewWorkerRunner("w", noop, log, WithBackoffJitter())
+	seen := map[time.Duration]bool{}
+	for range 100 {
+		d := jittered.delay(time.Second)
+		if d < 500*time.Millisecond || d > time.Second {
+			t.Fatalf("jittered delay %v outside [500ms, 1s]", d)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 2 {
+		t.Fatal("jitter produced identical delays")
+	}
+}
