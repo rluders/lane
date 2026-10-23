@@ -265,6 +265,26 @@ Avoid it if you need:
 - ❌ A full application framework with routing conventions
 - ❌ Managed configuration, observability, or deployment tooling
 
+## 🏗️ Architecture
+
+Two packages, with dependencies pointing one way:
+
+```
+lane/v2                    lifecycle core (no dependency on built-in runners)
+├── lane.go, runner.go     Lane, Runner, Readier, Run/shutdown coordination
+├── health.go              Health + State model (no net/http)
+├── healthhttp.go          HTTP adapters: LivenessHandler, ReadinessHandler, CheckHealth, RunHealthCheck
+├── recovery.go            PanicError, Go, RecoverMiddleware
+└── signals.go             SIGINT/SIGTERM handling
+
+lane/v2/runners            built-in runners: HTTP, Worker, Scheduler
+                           (does not import lane; satisfies lane.Runner / lane.Readier structurally)
+```
+
+- The core coordinates any `Runner`; it never imports `runners`. Custom runners are first-class.
+- The health model (`Health`, `State`) is independent of HTTP; HTTP exposure is a thin adapter in the same package so the common case stays a single import.
+- These rules are enforced by `architecture_test.go`.
+
 ## ⬆️ Migrating from v1
 
 | v1 | v2 |
