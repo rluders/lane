@@ -22,7 +22,7 @@ type Lane struct {
 	runners         []Runner
 	shutdownTimeout time.Duration
 	log             *slog.Logger
-	health          *HealthState
+	health          *Health
 }
 
 // Option configures a Lane.
@@ -38,7 +38,7 @@ func New(log *slog.Logger, opts ...Option) *Lane {
 	l := &Lane{
 		log:             log,
 		shutdownTimeout: defaultShutdownTimeout,
-		health:          &HealthState{},
+		health:          &Health{},
 	}
 	for _, o := range opts {
 		o(l)
@@ -52,18 +52,20 @@ func (l *Lane) AddRunner(runners ...Runner) {
 	l.runners = append(l.runners, runners...)
 }
 
-// Health returns the HealthState so callers can pass it to ReadinessHandler.
-func (l *Lane) Health() *HealthState {
+// Health returns the Lane's lifecycle state and the liveness and readiness
+// derived from it, e.g. for LivenessHandler and ReadinessHandler.
+func (l *Lane) Health() *Health {
 	return l.health
 }
 
 // Run starts all runners concurrently, blocks until a signal or runner failure,
 // then shuts down runners in reverse registration order.
 //
-// Lane becomes ready once every runner implementing Readier reports ready. A
-// Ready error is treated like a runner failure. Lane never becomes ready if a
-// runner fails or ctx is cancelled first, and is marked not ready as soon as
-// shutdown begins.
+// Health (see State) moves Starting → Running once every runner implementing
+// Readier reports ready; a Ready error is treated like a runner failure. If a
+// runner fails or ctx is cancelled first, it goes straight to Stopping and
+// never becomes ready. Shutdown moves it to Stopping (not ready, still live)
+// and Run's return to Stopped (not live).
 //
 // Every runner receives Stop, even if an earlier Stop failed or the shutdown
 // timeout expired; in the latter case runners get an already-expired ctx and
@@ -97,6 +99,9 @@ func (l *Lane) Health() *HealthState {
 // error, in stop order, and any shutdown timeout error. Later failures are
 // logged but not returned. Use errors.Is / errors.As on the result.
 func (l *Lane) Run(ctx context.Context) error {
+	l.health.transition(StateStarting) // no-op on first run; resets after a previous Run
+	defer l.health.transition(StateStopped)
+
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
 
@@ -137,15 +142,15 @@ func (l *Lane) Run(ctx context.Context) error {
 		return nil
 	})
 
-	// SetReady(true) happens on this goroutine, so it can never race with the
-	// SetReady(false) below.
+	// The Running transition happens on this goroutine, so it can never race
+	// with the Stopping transition below.
 wait:
 	for {
 		select {
 		case <-readyCh:
 			readyCh = nil
 			if gctx.Err() == nil {
-				l.health.SetReady(true)
+				l.health.transition(StateRunning)
 			}
 		case <-sigCh:
 			break wait
@@ -155,7 +160,7 @@ wait:
 		}
 	}
 
-	l.health.SetReady(false)
+	l.health.transition(StateStopping)
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), l.shutdownTimeout)

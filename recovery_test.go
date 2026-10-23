@@ -175,7 +175,7 @@ func TestGo_PanicTriggersLaneShutdown(t *testing.T) {
 	go func() { done <- l.Run(ctx) }()
 
 	deadline := time.Now().Add(time.Second)
-	for !l.Health().IsReady() {
+	for !l.Health().Ready() {
 		if time.Now().After(deadline) {
 			t.Fatal("lane did not become ready")
 		}
@@ -194,7 +194,7 @@ func TestGo_PanicTriggersLaneShutdown(t *testing.T) {
 	if !r.stopped.Load() {
 		t.Fatal("runner was not stopped")
 	}
-	if l.Health().IsReady() {
+	if l.Health().Ready() {
 		t.Fatal("still ready after shutdown")
 	}
 }
