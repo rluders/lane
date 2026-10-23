@@ -118,7 +118,7 @@ type Runner interface {
 **Contract:**
 - `Start` **must block** until the runner stops or fails
 - `Stop` initiates graceful shutdown and **must respect the context deadline**
-- If `Start` returns a non-nil error, lane cancels all other runners
+- If `Start` returns a non-nil error, lane cancels all other runners. Once shutdown has begun, returning `ctx.Err()` (`context.Canceled`/`DeadlineExceeded`) from `Start` counts as a clean exit, so `Run` returns `nil` on a normal SIGTERM
 - A panic in `Start`, `Ready`, or `Stop` is recovered, logged with its stack trace, and treated as an error from that method (`*lane.PanicError`). Goroutines a runner spawns itself are not covered — use `lane.Go`
 - Optionally implement `lane.Readier` (`Ready(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
 - Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
