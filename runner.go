@@ -2,9 +2,17 @@ package lane
 
 import "context"
 
-// Runner is the core lifecycle abstraction.
-// Start MUST block until the runner stops or fails.
-// Stop initiates a graceful shutdown; it MUST respect ctx deadline.
+// Runner is the core lifecycle abstraction. See docs/runners.md for
+// implementation guidelines.
+//
+// Start MUST block until the runner stops or fails, and MUST return once ctx
+// is cancelled (nil or ctx.Err() then count as a clean exit). Returning nil
+// earlier means the runner finished; a non-nil error is a failure that shuts
+// Lane down.
+//
+// Stop initiates a graceful shutdown and SHOULD return once it completes; it
+// MUST respect the ctx deadline. Lane calls Stop exactly once per Run, even if
+// Start already returned or failed, and possibly with an expired ctx.
 type Runner interface {
 	Name() string
 	Start(ctx context.Context) error
