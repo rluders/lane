@@ -9,7 +9,7 @@
   <a href="https://go.dev/doc/devel/release">
     <img src="https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go 1.26+">
   </a>
-  <a href="https://pkg.go.dev/github.com/rluders/lane">
+  <a href="https://pkg.go.dev/github.com/rluders/lane/v2">
     <img src="https://pkg.go.dev/badge/github.com/rluders/lane.svg" alt="Go Reference">
   </a>
   <a href="https://goreportcard.com/report/github.com/rluders/lane">
@@ -44,6 +44,14 @@ Wiring SIGINT/SIGTERM handling, concurrent startup, health probes, and ordered s
 
 Dependency wiring is the caller's responsibility.
 
+## 📥 Install
+
+```sh
+go get github.com/rluders/lane/v2
+```
+
+v2 is in development on `main` and contains breaking changes; v1 remains available as `github.com/rluders/lane@v1`.
+
 ## ⚡ Quick Example
 
 ```go
@@ -56,8 +64,8 @@ import (
     "os"
     "time"
 
-    "github.com/rluders/lane"
-    "github.com/rluders/lane/runners"
+    "github.com/rluders/lane/v2"
+    "github.com/rluders/lane/v2/runners"
 )
 
 func main() {
