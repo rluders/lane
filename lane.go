@@ -83,10 +83,19 @@ func (l *Lane) Health() *HealthState {
 // the deadline, Run returns without waiting for it and reports which runners
 // were still running. Such runners are leaked, not killed.
 //
-// Returns nil on clean shutdown. Otherwise returns the first runner error
-// joined (errors.Join) with every Stop error, in stop order, and any shutdown
-// timeout error. If several runners fail concurrently, only the first error is
-// returned; all are logged.
+// Cancellation vs. failure: cancelling ctx (or a SIGINT/SIGTERM) is an
+// intentional shutdown. Any non-nil error from Start or Ready is a runner
+// failure, including context.Canceled or context.DeadlineExceeded returned
+// while Lane is still running. Once shutdown has begun (ctx cancelled, signal,
+// or another runner failed), a Start that returns context.Canceled or
+// context.DeadlineExceeded is treated as a clean exit; any other error is
+// still a failure. A Start that returns nil before shutdown simply finishes;
+// the other runners keep running.
+//
+// Returns nil on clean shutdown. Otherwise the first runner failure is the
+// primary cause and is returned first, joined (errors.Join) with every Stop
+// error, in stop order, and any shutdown timeout error. Later failures are
+// logged but not returned. Use errors.Is / errors.As on the result.
 func (l *Lane) Run(ctx context.Context) error {
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
@@ -101,6 +110,9 @@ func (l *Lane) Run(ctx context.Context) error {
 		g.Go(func() error {
 			defer running.done(i)
 			if err := callRunner(l.log, r.Name(), "start", func() error { return r.Start(gctx) }); err != nil {
+				if gctx.Err() != nil && isContextErr(err) {
+					return nil // the runner is reporting the shutdown, not a failure
+				}
 				l.log.Error("runner failed", "runner", r.Name(), "error", err)
 				running.fail(err)
 				return err
@@ -178,6 +190,11 @@ wait:
 	}
 
 	return errors.Join(append([]error{runErr}, stopErrs...)...)
+}
+
+// isContextErr reports whether err is a context cancellation or deadline error.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // stopRunner calls r.Stop and returns once it does or ctx is done, whichever

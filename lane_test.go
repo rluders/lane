@@ -3,6 +3,7 @@ package lane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -693,3 +694,126 @@ func TestLane_TimeoutKeepsFirstRunnerError(t *testing.T) {
 		t.Fatalf("expected start error and deadline exceeded, got %v", err)
 	}
 }
+
+// ctxErrRunner blocks until ctx is done, then returns err(ctx) — the common
+// Go idiom of reporting cancellation as an error.
+type ctxErrRunner struct {
+	*fakeRunner
+	err func(ctx context.Context) error
+}
+
+func (c *ctxErrRunner) Start(ctx context.Context) error {
+	<-ctx.Done()
+	return c.err(ctx)
+}
+
+func newCtxErr(name string, stopOrder *[]string, mu *sync.Mutex, err func(context.Context) error) *ctxErrRunner {
+	return &ctxErrRunner{fakeRunner: newFake(name, stopOrder, mu), err: err}
+}
+
+func TestLane_ContextErrorOnShutdownIsClean(t *testing.T) {
+	cases := map[string]func(context.Context) error{
+		"canceled":         func(ctx context.Context) error { return ctx.Err() },
+		"wrapped canceled": func(ctx context.Context) error { return fmt.Errorf("consumer: %w", ctx.Err()) },
+		"deadline":         func(context.Context) error { return context.DeadlineExceeded },
+	}
+	for name, errFn := range cases {
+		t.Run(name, func(t *testing.T) {
+			l, _ := newTestLane()
+			var stopOrder []string
+			var mu sync.Mutex
+			l.AddRunner(newCtxErr("idiomatic", &stopOrder, &mu, errFn))
+
+			if err := runUntilCancelled(t, l, 3*time.Second); err != nil {
+				t.Fatalf("clean shutdown returned %v", err)
+			}
+		})
+	}
+}
+
+func TestLane_ContextErrorBeforeShutdownIsFailure(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	r := newFake("spurious", &stopOrder, &mu)
+	r.startErr = context.Canceled // returned while Lane is still running
+	l.AddRunner(r)
+
+	_, done := startLane(l)
+	if err := waitRun(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled failure, got %v", err)
+	}
+}
+
+func TestLane_PrimaryFailureNotMaskedByCancellation(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	errDB := errors.New("db connection lost")
+	failing := newFake("db", &stopOrder, &mu)
+	failing.startErr = errDB
+	l.AddRunner(
+		failing,
+		newCtxErr("a", &stopOrder, &mu, func(ctx context.Context) error { return ctx.Err() }),
+		newCtxErr("b", &stopOrder, &mu, func(ctx context.Context) error { return ctx.Err() }),
+	)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	if !errors.Is(err, errDB) {
+		t.Fatalf("expected primary failure, got %v", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation of other runners leaked into result: %v", err)
+	}
+}
+
+func TestLane_NonContextErrorDuringShutdownIsFailure(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	errFlush := errors.New("flush failed")
+	l.AddRunner(newCtxErr("flusher", &stopOrder, &mu, func(context.Context) error { return errFlush }))
+
+	if err := runUntilCancelled(t, l, 3*time.Second); !errors.Is(err, errFlush) {
+		t.Fatalf("expected flush error, got %v", err)
+	}
+}
+
+func TestLane_RunnerReturningNilEarlyKeepsLaneRunning(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	oneShot := newFake("migrate", &stopOrder, &mu)
+	server := newFake("server", &stopOrder, &mu)
+	l.AddRunner(&nilStarter{oneShot}, server)
+
+	cancel, done := startLane(l)
+	defer cancel()
+	waitReady(t, l)
+
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned early (%v) after a runner finished cleanly", err)
+	default:
+	}
+	if !l.Health().IsReady() {
+		t.Fatal("not ready after a runner finished cleanly")
+	}
+
+	cancel()
+	if err := waitRun(t, done); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertStopOrder(t, &mu, stopOrder, "server", "migrate")
+}
+
+// nilStarter returns nil from Start immediately.
+type nilStarter struct{ *fakeRunner }
+
+func (n *nilStarter) Start(context.Context) error { return nil }
