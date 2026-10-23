@@ -27,8 +27,11 @@ type options struct {
 	// SchedulerRunner
 	immediate bool
 
-	// HTTPRunner
+	// HTTPRunner, TCPRunner
 	certFile, keyFile string
+
+	// FuncRunner
+	stop func(ctx context.Context) error
 }
 
 func newOptions(opts []Option) options {
@@ -87,7 +90,13 @@ func WithImmediateRun() Option {
 	return func(o *options) { o.immediate = true }
 }
 
-// WithTLS makes HTTPRunner serve TLS using the given certificate and key files.
+// WithTLS makes HTTPRunner and TCPRunner serve TLS using the given
+// certificate and key files.
 func WithTLS(certFile, keyFile string) Option {
 	return func(o *options) { o.certFile, o.keyFile = certFile, keyFile }
+}
+
+// WithStop sets the function FuncRunner calls from Stop.
+func WithStop(fn func(ctx context.Context) error) Option {
+	return func(o *options) { o.stop = fn }
 }
