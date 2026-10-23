@@ -61,7 +61,7 @@ import (
 )
 
 func main() {
-    lane.RunHealthCheck(":8080")
+    lane.RunHealthCheck(":8080", lane.WithHealthPath("/live"))
 
     log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -173,12 +173,21 @@ Call `RunHealthCheck` at the very top of `main()` to support Docker `HEALTHCHECK
 
 ```go
 func main() {
-    lane.RunHealthCheck(":8080")
+    lane.RunHealthCheck(":8080", lane.WithHealthPath("/live"))
     // ... rest of main
 }
 ```
 
-When invoked as `myservice healthcheck`, the process exits 0 (healthy) or 1 (unhealthy) immediately without starting the service.
+When invoked as `myservice healthcheck`, the process sends `GET` to the endpoint and exits 0 (healthy) or 1 (unhealthy, reason on stderr) immediately without starting the service.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `addr` (argument) | — | `":port"` (localhost assumed) or `"host:port"` |
+| `WithHealthPath(path)` | `"/health"` | Request path |
+| `WithHealthTimeout(d)` | `5s` | Bound on the whole request |
+| `WithExpectedStatus(code)` | `200` | Status treated as healthy |
+
+`lane.CheckHealth(ctx, addr, opts...)` performs the same check and returns an error instead of exiting.
 
 ## 🛡️ Recovery
 
