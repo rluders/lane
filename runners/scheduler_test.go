@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-func newTestScheduler(interval time.Duration, fn JobFn, opts ...SchedulerOption) *SchedulerRunner {
-	return NewSchedulerRunner("sched", interval, fn, slog.New(slog.NewTextHandler(io.Discard, nil)), opts...)
+func newTestScheduler(interval time.Duration, fn Func, opts ...Option) *SchedulerRunner {
+	opts = append([]Option{WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))}, opts...)
+	return NewSchedulerRunner("sched", interval, fn, opts...)
 }
 
 // runFor runs s until d elapses and fails the test if Start errors.
@@ -143,7 +144,7 @@ func TestScheduler_ErrorsContinueScheduling(t *testing.T) {
 	s := newTestScheduler(20*time.Millisecond, func(context.Context) error {
 		calls.Add(1)
 		return errJob
-	}, WithJobErrorHandler(func(err error) {
+	}, WithErrorHandler(func(err error) {
 		if errors.Is(err, errJob) {
 			reported.Add(1)
 		}
@@ -165,7 +166,7 @@ func TestScheduler_CancelDuringJob(t *testing.T) {
 		close(started)
 		<-ctx.Done()
 		return ctx.Err()
-	}, WithImmediateRun(), WithJobErrorHandler(func(error) { reported.Add(1) }))
+	}, WithImmediateRun(), WithErrorHandler(func(error) { reported.Add(1) }))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

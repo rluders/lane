@@ -164,7 +164,7 @@ func (s *spawningRunner) Stop(context.Context) error {
 
 func TestGo_PanicTriggersLaneShutdown(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	l := New(log, WithShutdownTimeout(time.Second))
+	l := New(WithLogger(log), WithShutdownTimeout(time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

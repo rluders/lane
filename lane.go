@@ -33,10 +33,19 @@ func WithShutdownTimeout(d time.Duration) Option {
 	return func(l *Lane) { l.shutdownTimeout = d }
 }
 
-// New constructs a Lane. log must not be nil.
-func New(log *slog.Logger, opts ...Option) *Lane {
+// WithLogger sets the Lane's logger (default slog.Default()). nil is ignored.
+func WithLogger(log *slog.Logger) Option {
+	return func(l *Lane) {
+		if log != nil {
+			l.log = log
+		}
+	}
+}
+
+// New constructs a Lane.
+func New(opts ...Option) *Lane {
 	l := &Lane{
-		log:             log,
+		log:             slog.Default(),
 		shutdownTimeout: defaultShutdownTimeout,
 		health:          &Health{},
 	}
@@ -62,7 +71,7 @@ func (l *Lane) Health() *Health {
 // then shuts down runners in reverse registration order.
 //
 // Health (see State) moves Starting → Running once every runner implementing
-// Readier reports ready; a Ready error is treated like a runner failure. If a
+// Readier reports ready; a WaitReady error is treated like a runner failure. If a
 // runner fails or ctx is cancelled first, it goes straight to Stopping and
 // never becomes ready. Shutdown moves it to Stopping (not ready, still live)
 // and Run's return to Stopped (not live).
@@ -72,8 +81,8 @@ func (l *Lane) Health() *Health {
 // must return promptly. Stop is called on every runner, including those whose
 // Start already returned.
 //
-// A panic in Start, Ready, or Stop is recovered and treated as an error from
-// that method, returned as a *PanicError: in Start or Ready it triggers
+// A panic in Start, WaitReady, or Stop is recovered and treated as an error from
+// that method, returned as a *PanicError: in Start or WaitReady it triggers
 // shutdown, in Stop the remaining runners are still stopped. Panics in
 // goroutines a runner spawns itself are not recovered; use Go for those.
 //
@@ -305,7 +314,7 @@ func (l *Lane) waitReady(ctx context.Context) error {
 		}
 		name := r.Name()
 		g.Go(func() error {
-			if err := callRunner(l.log, name, "ready", func() error { return rd.Ready(gctx) }); err != nil {
+			if err := callRunner(l.log, name, "ready", func() error { return rd.WaitReady(gctx) }); err != nil {
 				return fmt.Errorf("ready %s: %w", name, err)
 			}
 			return nil

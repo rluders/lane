@@ -9,8 +9,9 @@ import (
 	"net/http"
 )
 
-// HTTPRunner wraps an *http.Server as a Runner.
-// The caller is responsible for configuring the server (timeouts, handler, TLS).
+// HTTPRunner wraps an *http.Server as a Runner. The caller configures the
+// server (timeouts, handler, TLS config); use WithTLS to serve TLS from
+// certificate and key files.
 type HTTPRunner struct {
 	name     string
 	server   *http.Server
@@ -20,14 +21,18 @@ type HTTPRunner struct {
 	ready    chan struct{} // closed once the listener is bound
 }
 
-// NewHTTPRunner creates a plain HTTP runner.
-func NewHTTPRunner(name string, server *http.Server, log *slog.Logger) *HTTPRunner {
-	return &HTTPRunner{name: name, server: server, log: log, ready: make(chan struct{})}
-}
-
-// NewHTTPSRunner creates a TLS HTTP runner.
-func NewHTTPSRunner(name string, server *http.Server, certFile, keyFile string, log *slog.Logger) *HTTPRunner {
-	return &HTTPRunner{name: name, server: server, certFile: certFile, keyFile: keyFile, log: log, ready: make(chan struct{})}
+// NewHTTPRunner creates an HTTP runner. Applicable options: WithLogger,
+// WithTLS.
+func NewHTTPRunner(name string, server *http.Server, opts ...Option) *HTTPRunner {
+	o := newOptions(opts)
+	return &HTTPRunner{
+		name:     name,
+		server:   server,
+		log:      o.log,
+		certFile: o.certFile,
+		keyFile:  o.keyFile,
+		ready:    make(chan struct{}),
+	}
 }
 
 func (r *HTTPRunner) Name() string { return r.name }
@@ -60,8 +65,8 @@ func (r *HTTPRunner) Start(ctx context.Context) error {
 	return fmt.Errorf("http runner %s: %w", r.name, err)
 }
 
-// Ready blocks until the listener is bound or ctx is done.
-func (r *HTTPRunner) Ready(ctx context.Context) error {
+// WaitReady blocks until the listener is bound or ctx is done.
+func (r *HTTPRunner) WaitReady(ctx context.Context) error {
 	select {
 	case <-r.ready:
 		return nil

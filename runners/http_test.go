@@ -13,7 +13,7 @@ import (
 
 func newTestHTTPRunner(addr string) *HTTPRunner {
 	srv := &http.Server{Addr: addr, Handler: http.NotFoundHandler()}
-	return NewHTTPRunner("http", srv, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewHTTPRunner("http", srv, WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 }
 
 func TestHTTPRunner_ReadyAfterListen(t *testing.T) {
@@ -22,7 +22,7 @@ func TestHTTPRunner_ReadyAfterListen(t *testing.T) {
 	// Not ready before Start.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if err := r.Ready(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := r.WaitReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Ready before Start: got %v, want deadline exceeded", err)
 	}
 
@@ -31,7 +31,7 @@ func TestHTTPRunner_ReadyAfterListen(t *testing.T) {
 
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
 	defer readyCancel()
-	if err := r.Ready(readyCtx); err != nil {
+	if err := r.WaitReady(readyCtx); err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
 
@@ -57,7 +57,7 @@ func TestHTTPRunner_ListenFailureNeverReady(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if err := r.Ready(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := r.WaitReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Ready after failed Start: got %v, want deadline exceeded", err)
 	}
 }

@@ -59,7 +59,7 @@ func (f *fakeRunner) Stop(ctx context.Context) error {
 
 func newTestLane() (*Lane, *slog.Logger) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	return New(log, WithShutdownTimeout(2*time.Second)), log
+	return New(WithLogger(log), WithShutdownTimeout(2*time.Second)), log
 }
 
 func TestLane_ShutdownLIFO(t *testing.T) {
@@ -239,7 +239,7 @@ func TestLane_MultipleStopErrorsAreJoined(t *testing.T) {
 
 func TestLane_StopContinuesAfterShutdownTimeout(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+	l := New(WithLogger(log), WithShutdownTimeout(100*time.Millisecond))
 
 	var stopOrder []string
 	var mu sync.Mutex
@@ -310,7 +310,7 @@ func newReadyFake(name string, stopOrder *[]string, mu *sync.Mutex) *readyRunner
 	return &readyRunner{fakeRunner: newFake(name, stopOrder, mu), ready: make(chan struct{})}
 }
 
-func (r *readyRunner) Ready(ctx context.Context) error {
+func (r *readyRunner) WaitReady(ctx context.Context) error {
 	if r.readyErr != nil {
 		return r.readyErr
 	}
@@ -477,7 +477,7 @@ func (p *panicRunner) Stop(ctx context.Context) error {
 
 type panicReadier struct{ *fakeRunner }
 
-func (p *panicReadier) Ready(ctx context.Context) error { panic("boom in ready") }
+func (p *panicReadier) WaitReady(ctx context.Context) error { panic("boom in ready") }
 
 func assertPanicError(t *testing.T, err error, runner, op string) {
 	t.Helper()
@@ -627,7 +627,7 @@ func (s *stuckRunner) Stop(ctx context.Context) error {
 
 func TestLane_StopIgnoringDeadlineDoesNotBlock(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+	l := New(WithLogger(log), WithShutdownTimeout(100*time.Millisecond))
 
 	var stopOrder []string
 	var mu sync.Mutex
@@ -651,7 +651,7 @@ func TestLane_StopIgnoringDeadlineDoesNotBlock(t *testing.T) {
 
 func TestLane_StartIgnoringCancellationDoesNotBlock(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+	l := New(WithLogger(log), WithShutdownTimeout(100*time.Millisecond))
 
 	var stopOrder []string
 	var mu sync.Mutex
@@ -676,7 +676,7 @@ func TestLane_StartIgnoringCancellationDoesNotBlock(t *testing.T) {
 
 func TestLane_TimeoutKeepsFirstRunnerError(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	l := New(log, WithShutdownTimeout(100*time.Millisecond))
+	l := New(WithLogger(log), WithShutdownTimeout(100*time.Millisecond))
 
 	var stopOrder []string
 	var mu sync.Mutex
@@ -913,5 +913,14 @@ func TestLane_RunAgainResetsHealth(t *testing.T) {
 		if l.Health().State() != StateStopped {
 			t.Fatalf("run %d: ended in %v", i, l.Health().State())
 		}
+	}
+}
+
+func TestNew_DefaultLogger(t *testing.T) {
+	if l := New(); l.log != slog.Default() {
+		t.Fatal("New() should default to slog.Default()")
+	}
+	if l := New(WithLogger(nil)); l.log != slog.Default() {
+		t.Fatal("WithLogger(nil) should keep the default")
 	}
 }
