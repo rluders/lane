@@ -131,7 +131,8 @@ type Runner interface {
 - If `Start` returns a non-nil error, lane cancels all other runners. Once shutdown has begun, returning `ctx.Err()` (`context.Canceled`/`DeadlineExceeded`) from `Start` counts as a clean exit, so `Run` returns `nil` on a normal SIGTERM
 - A panic in `Start`, `WaitReady`, or `Stop` is recovered, logged with its stack trace, and treated as an error from that method (`*lane.PanicError`). Goroutines a runner spawns itself are not covered — use `lane.Go`
 - Optionally implement `lane.Readier` (`WaitReady(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
-- Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
+- Every started runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
+- Use `l.AddStage(...)` to start runners in order: a stage starts only after every runner in earlier stages is ready (e.g. DB before API). Shutdown stays reverse-order
 - Shutdown is bounded by the shutdown timeout: lane never waits past it for a `Stop` or `Start` that ignores its context. Such runners are reported in the returned error (`context.DeadlineExceeded`) and left running
 - `Run` returns the first runner error joined with all `Stop` errors (use `errors.Is` to inspect)
 
