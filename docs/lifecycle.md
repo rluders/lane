@@ -15,6 +15,7 @@ This is the authoritative description of what `lane` guarantees. The godoc on
 - [What `Run` returns](#what-run-returns)
 - [Panics](#panics)
 - [Repeated and concurrent calls](#repeated-and-concurrent-calls)
+- [Lifecycle events](#lifecycle-events)
 
 ## Design principles
 
@@ -84,7 +85,10 @@ failures never affect liveness. Transitions not shown above are rejected.
    concurrently (it may run before `Start` has begun).
 4. When every `WaitReady` has returned nil, Lane moves to `Running`.
    Runners that don't implement `Readier` count as ready once launched; with
-   none, Lane is `Running` immediately.
+   none, Lane is `Running` immediately. In that case startup is effectively
+   instantaneous, and a `Start` that fails a moment later is a runtime
+   failure (Lane may briefly be `Running`). Implement `Readier` on any runner
+   whose initialization can fail if you need "never ready on failed startup".
 
 Startup ends early, going straight to `Stopping` without ever being ready, if:
 
@@ -177,3 +181,12 @@ Every recovered panic is logged at error level with `panic` and the full
   support restarting if you do this.
 - `Run` must not be called concurrently on the same `Lane`.
 - `AddRunner` must not be called while `Run` is running.
+
+## Lifecycle events
+
+Every transition above is also delivered as an `Event` to observers registered
+with `lane.WithObserver`: `LaneStarting`, `RunnerStarting`, `RunnerReady`,
+`LaneReady`, `LaneStopping`, `RunnerStopping`, `RunnerStopped`,
+`RunnerExited` and `LaneStopped`. Delivery is synchronous and serialized, in
+lifecycle order, with nothing after `LaneStopped`. See
+[observability.md](observability.md).

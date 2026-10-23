@@ -212,6 +212,20 @@ When invoked as `myservice healthcheck`, the process sends `GET` to the endpoint
 
 `lane.CheckHealth(ctx, addr, opts...)` performs the same check and returns an error instead of exiting.
 
+## 📡 Observability
+
+Register observers to receive structured lifecycle events (startup, readiness, failures, per-runner stop timings) and feed them to your logger, metrics or tracer. Lane itself depends on none of them.
+
+```go
+l := lane.New(lane.WithObserver(func(e lane.Event) {
+    if e.Kind == lane.EventRunnerStopped {
+        stopSeconds.WithLabelValues(e.Runner).Observe(e.Duration.Seconds())
+    }
+}))
+```
+
+📖 Events, ordering guarantees and slog/Prometheus/OpenTelemetry adapters: **[docs/observability.md](docs/observability.md)**.
+
 ## 🛡️ Recovery
 
 ### Panic policy
