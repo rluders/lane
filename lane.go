@@ -67,8 +67,14 @@ func (l *Lane) Health() *HealthState {
 // must return promptly. Stop is called on every runner, including those whose
 // Start already returned.
 //
+// A panic in Start, Ready, or Stop is recovered and treated as an error from
+// that method, returned as a *PanicError: in Start or Ready it triggers
+// shutdown, in Stop the remaining runners are still stopped. Panics in
+// goroutines a runner spawns itself are not recovered; use Go for those.
+//
 // Returns nil on clean shutdown. Otherwise returns the first runner error
-// joined (errors.Join) with every Stop error, in stop order.
+// joined (errors.Join) with every Stop error, in stop order. If several
+// runners fail concurrently, only the first error is returned; all are logged.
 func (l *Lane) Run(ctx context.Context) error {
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
@@ -81,7 +87,7 @@ func (l *Lane) Run(ctx context.Context) error {
 	for _, r := range l.runners {
 		r := r
 		g.Go(func() error {
-			if err := r.Start(gctx); err != nil {
+			if err := callRunner(l.log, r.Name(), "start", func() error { return r.Start(gctx) }); err != nil {
 				l.log.Error("runner failed", "runner", r.Name(), "error", err)
 				return err
 			}
@@ -129,7 +135,7 @@ wait:
 	var stopErrs []error
 	for i := len(l.runners) - 1; i >= 0; i-- {
 		r := l.runners[i]
-		if err := r.Stop(shutdownCtx); err != nil {
+		if err := callRunner(l.log, r.Name(), "stop", func() error { return r.Stop(shutdownCtx) }); err != nil {
 			l.log.Error("runner stop error", "runner", r.Name(), "error", err)
 			stopErrs = append(stopErrs, fmt.Errorf("stop %s: %w", r.Name(), err))
 		}
@@ -148,7 +154,7 @@ func (l *Lane) waitReady(ctx context.Context) error {
 		}
 		name := r.Name()
 		g.Go(func() error {
-			if err := rd.Ready(gctx); err != nil {
+			if err := callRunner(l.log, name, "ready", func() error { return rd.Ready(gctx) }); err != nil {
 				return fmt.Errorf("ready %s: %w", name, err)
 			}
 			return nil

@@ -6,7 +6,39 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 )
+
+// PanicError is returned by Lane.Run when a Runner's Start, Ready, or Stop
+// panics. Lane recovers the panic, logs the stack trace, and treats it like an
+// error returned from that method. Use errors.As to inspect it.
+type PanicError struct {
+	Runner string // Runner name
+	Op     string // "start", "ready" or "stop"
+	Value  any    // value passed to panic
+	Stack  []byte // stack trace of the panicking goroutine
+}
+
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("runner %s panicked during %s: %v", e.Runner, e.Op, e.Value)
+}
+
+// callRunner runs fn, converting a panic into a *PanicError.
+func callRunner(log *slog.Logger, name, op string, fn func() error) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			pe := &PanicError{Runner: name, Op: op, Value: rec, Stack: debug.Stack()}
+			log.Error("runner panic",
+				"runner", name,
+				"op", op,
+				"panic", fmt.Sprintf("%v", rec),
+				"stack", string(pe.Stack),
+			)
+			err = pe
+		}
+	}()
+	return fn()
+}
 
 // Go runs fn in a goroutine with structured panic recovery.
 // On panic: logs stack trace and calls cancel to propagate failure up.

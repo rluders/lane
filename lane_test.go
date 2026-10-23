@@ -431,3 +431,141 @@ func TestLane_CancelDuringStartupPreventsReady(t *testing.T) {
 		t.Fatal("ready after cancellation during startup")
 	}
 }
+
+// panicRunner is a fakeRunner that panics in the configured methods.
+type panicRunner struct {
+	*fakeRunner
+	panicStart, panicStop bool
+}
+
+func (p *panicRunner) Start(ctx context.Context) error {
+	if p.panicStart {
+		panic("boom in start")
+	}
+	return p.fakeRunner.Start(ctx)
+}
+
+func (p *panicRunner) Stop(ctx context.Context) error {
+	err := p.fakeRunner.Stop(ctx)
+	if p.panicStop {
+		panic("boom in stop")
+	}
+	return err
+}
+
+type panicReadier struct{ *fakeRunner }
+
+func (p *panicReadier) Ready(ctx context.Context) error { panic("boom in ready") }
+
+func assertPanicError(t *testing.T, err error, runner, op string) {
+	t.Helper()
+	var pe *PanicError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *PanicError, got %v", err)
+	}
+	if pe.Runner != runner || pe.Op != op {
+		t.Fatalf("PanicError{Runner: %q, Op: %q}, want {%q, %q}", pe.Runner, pe.Op, runner, op)
+	}
+	if len(pe.Stack) == 0 {
+		t.Fatal("PanicError has no stack trace")
+	}
+}
+
+func TestLane_PanicInStartTriggersShutdown(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	ok := newFake("ok", &stopOrder, &mu)
+	p := &panicRunner{fakeRunner: newFake("bad", &stopOrder, &mu), panicStart: true}
+	l.AddRunner(ok, p)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	assertPanicError(t, err, "bad", "start")
+	if l.Health().IsReady() {
+		t.Fatal("ready after panic in start")
+	}
+	assertStopOrder(t, &mu, stopOrder, "bad", "ok")
+}
+
+func TestLane_PanicInStopContinuesShutdown(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	a := newFake("alpha", &stopOrder, &mu)
+	p := &panicRunner{fakeRunner: newFake("bad", &stopOrder, &mu), panicStop: true}
+	c := newFake("gamma", &stopOrder, &mu)
+	l.AddRunner(a, p, c)
+
+	err := runUntilCancelled(t, l, 3*time.Second)
+	assertPanicError(t, err, "bad", "stop")
+	assertStopOrder(t, &mu, stopOrder, "gamma", "bad", "alpha")
+}
+
+func TestLane_PanicInReadyTriggersShutdown(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	p := &panicReadier{newFake("bad", &stopOrder, &mu)}
+	l.AddRunner(p)
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	assertPanicError(t, err, "bad", "ready")
+	if l.Health().IsReady() {
+		t.Fatal("ready after panic in ready")
+	}
+}
+
+func TestLane_ConcurrentPanicsInStart(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	for _, name := range []string{"a", "b", "c"} {
+		l.AddRunner(&panicRunner{fakeRunner: newFake(name, &stopOrder, &mu), panicStart: true})
+	}
+
+	_, done := startLane(l)
+	err := waitRun(t, done)
+	var pe *PanicError
+	if !errors.As(err, &pe) || pe.Op != "start" {
+		t.Fatalf("expected start *PanicError, got %v", err)
+	}
+	assertStopOrder(t, &mu, stopOrder, "c", "b", "a")
+}
+
+// latePanicRunner panics in Start after the lane has become ready.
+type latePanicRunner struct {
+	*fakeRunner
+	trigger chan struct{}
+}
+
+func (p *latePanicRunner) Start(ctx context.Context) error {
+	<-p.trigger
+	panic("boom at runtime")
+}
+
+func TestLane_PanicAtRuntimeTriggersShutdown(t *testing.T) {
+	l, _ := newTestLane()
+	var stopOrder []string
+	var mu sync.Mutex
+
+	ok := newFake("ok", &stopOrder, &mu)
+	p := &latePanicRunner{fakeRunner: newFake("bad", &stopOrder, &mu), trigger: make(chan struct{})}
+	l.AddRunner(ok, p)
+
+	_, done := startLane(l)
+	waitReady(t, l)
+	close(p.trigger)
+
+	err := waitRun(t, done)
+	assertPanicError(t, err, "bad", "start")
+	if l.Health().IsReady() {
+		t.Fatal("still ready after runtime panic")
+	}
+	assertStopOrder(t, &mu, stopOrder, "bad", "ok")
+}
