@@ -23,6 +23,7 @@ type Lane struct {
 	shutdownTimeout time.Duration
 	log             *slog.Logger
 	health          *Health
+	observers       []Observer
 }
 
 // Option configures a Lane.
@@ -55,8 +56,8 @@ func New(opts ...Option) *Lane {
 	return l
 }
 
-// AddRunner appends runners. Registration order determines startup order and
-// reverse-order (LIFO) shutdown order.
+// AddRunner appends runners. All runners start concurrently; registration
+// order determines the reverse-order (LIFO) shutdown order.
 func (l *Lane) AddRunner(runners ...Runner) {
 	l.runners = append(l.runners, runners...)
 }
@@ -111,9 +112,15 @@ func (l *Lane) Health() *Health {
 // primary cause and is returned first, joined (errors.Join) with every Stop
 // error, in stop order, and any shutdown timeout error. Later failures are
 // logged but not returned. Use errors.Is / errors.As on the result.
-func (l *Lane) Run(ctx context.Context) error {
+func (l *Lane) Run(ctx context.Context) (err error) {
+	ev := &emitter{log: l.log, observers: l.observers}
+	runStart := time.Now()
 	l.health.transition(StateStarting) // no-op on first run; resets after a previous Run
-	defer l.health.transition(StateStopped)
+	ev.emit(Event{Kind: EventLaneStarting, Time: runStart})
+	defer func() {
+		l.health.transition(StateStopped)
+		ev.emit(Event{Kind: EventLaneStopped, Err: err, Duration: time.Since(runStart)})
+	}()
 
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
@@ -125,8 +132,13 @@ func (l *Lane) Run(ctx context.Context) error {
 	running := newRunningSet(l.runners)
 
 	for i, r := range l.runners {
-		g.Go(func() error {
+		started := time.Now()
+		ev.emit(Event{Kind: EventRunnerStarting, Runner: r.Name(), Time: started})
+		g.Go(func() (err error) {
 			defer running.done(i)
+			defer func() {
+				ev.emit(Event{Kind: EventRunnerExited, Runner: r.Name(), Err: err, Duration: time.Since(started)})
+			}()
 			if err := callRunner(l.log, r.Name(), "start", func() error { return r.Start(gctx) }); err != nil {
 				if gctx.Err() != nil && isContextErr(err) {
 					return nil // the runner is reporting the shutdown, not a failure
@@ -143,7 +155,7 @@ func (l *Lane) Run(ctx context.Context) error {
 	readyID := running.add("readiness check")
 	g.Go(func() error {
 		defer running.done(readyID)
-		if err := l.waitReady(gctx); err != nil {
+		if err := l.waitReady(gctx, ev, runStart); err != nil {
 			if gctx.Err() != nil {
 				return nil
 			}
@@ -164,6 +176,7 @@ wait:
 			readyCh = nil
 			if gctx.Err() == nil {
 				l.health.transition(StateRunning)
+				ev.emit(Event{Kind: EventLaneReady, Duration: time.Since(runStart)})
 			}
 		case <-sigCh:
 			break wait
@@ -174,6 +187,7 @@ wait:
 	}
 
 	l.health.transition(StateStopping)
+	ev.emit(Event{Kind: EventLaneStopping, Err: running.firstErr()})
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), l.shutdownTimeout)
@@ -182,7 +196,15 @@ wait:
 	var stopErrs []error
 	for i := len(l.runners) - 1; i >= 0; i-- {
 		r := l.runners[i]
-		if err := l.stopRunner(shutdownCtx, r); err != nil {
+		ev.emit(Event{Kind: EventRunnerStopping, Runner: r.Name()})
+		stopStart, lateErr := time.Now(), shutdownCtx.Err()
+		err := l.stopRunner(shutdownCtx, r)
+		stopEv := Event{Kind: EventRunnerStopped, Runner: r.Name(), Err: err, Duration: time.Since(stopStart)}
+		if lateErr != nil {
+			stopEv.Err = lateErr // reached after the deadline: Stop called but not awaited
+		}
+		ev.emit(stopEv)
+		if err != nil {
 			l.log.Error("runner stop error", "runner", r.Name(), "error", err)
 			stopErrs = append(stopErrs, fmt.Errorf("stop %s: %w", r.Name(), err))
 		}
@@ -309,18 +331,20 @@ func (s *runningSet) names() []string {
 }
 
 // waitReady blocks until every Readier runner is ready, one fails, or ctx is done.
-func (l *Lane) waitReady(ctx context.Context) error {
+func (l *Lane) waitReady(ctx context.Context, ev *emitter, runStart time.Time) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, r := range l.runners {
+		name := r.Name()
 		rd, ok := r.(Readier)
 		if !ok {
+			ev.emit(Event{Kind: EventRunnerReady, Runner: name, Duration: time.Since(runStart)})
 			continue
 		}
-		name := r.Name()
 		g.Go(func() error {
 			if err := callRunner(l.log, name, "ready", func() error { return rd.WaitReady(gctx) }); err != nil {
 				return fmt.Errorf("ready %s: %w", name, err)
 			}
+			ev.emit(Event{Kind: EventRunnerReady, Runner: name, Duration: time.Since(runStart)})
 			return nil
 		})
 	}

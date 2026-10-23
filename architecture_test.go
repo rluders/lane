@@ -26,7 +26,7 @@ func fileImports(t *testing.T, path string) []string {
 
 // The lifecycle and health model must not depend on HTTP or on built-in runners.
 func TestArchitecture_CoreFilesIndependent(t *testing.T) {
-	for _, file := range []string{"lane.go", "runner.go", "health.go", "signals.go"} {
+	for _, file := range []string{"lane.go", "runner.go", "health.go", "signals.go", "events.go"} {
 		for _, imp := range fileImports(t, file) {
 			if strings.HasPrefix(imp, "net/http") || strings.HasSuffix(imp, "/runners") {
 				t.Errorf("%s imports %s", file, imp)

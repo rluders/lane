@@ -32,7 +32,8 @@ func TestStress_RandomLifecycles(t *testing.T) {
 
 func stressOnce(t *testing.T, rng *rand.Rand) {
 	const shutdownTimeout = 50 * time.Millisecond
-	l := quietLane(shutdownTimeout)
+	var events eventLog
+	l := observedLane(&events, WithShutdownTimeout(shutdownTimeout))
 
 	ms := func(max int) time.Duration { return time.Duration(rng.IntN(max+1)) * time.Millisecond }
 	release := make(chan struct{})
@@ -104,6 +105,8 @@ func stressOnce(t *testing.T, rng *rand.Rand) {
 	if s := l.Health().State(); s != StateStopped {
 		t.Fatalf("final state %v", s)
 	}
+	checkEventInvariants(t, events.all(), len(runners))
+
 	// Stop is invoked for every runner exactly once (possibly still running
 	// in the background if it was reached after the deadline).
 	deadline := time.Now().Add(time.Second)
@@ -114,5 +117,42 @@ func stressOnce(t *testing.T, rng *rand.Rand) {
 		if got := r.stopped.Load(); got != 1 {
 			t.Fatalf("%s: Stop called %d times", r.name, got)
 		}
+	}
+}
+
+// checkEventInvariants verifies the documented observer guarantees.
+func checkEventInvariants(t *testing.T, evs []Event, n int) {
+	t.Helper()
+	if len(evs) == 0 || evs[0].Kind != EventLaneStarting || evs[len(evs)-1].Kind != EventLaneStopped {
+		t.Fatalf("events must start with LaneStarting and end with LaneStopped: %v", kinds(evs))
+	}
+	count := map[EventKind]int{}
+	stopping := map[string]bool{}
+	laneStopping := false
+	for _, e := range evs {
+		count[e.Kind]++
+		switch e.Kind {
+		case EventLaneStopping:
+			laneStopping = true
+		case EventRunnerStopping:
+			if !laneStopping {
+				t.Fatalf("RunnerStopping before LaneStopping: %v", kinds(evs))
+			}
+			stopping[e.Runner] = true
+		case EventRunnerStopped:
+			if !stopping[e.Runner] {
+				t.Fatalf("RunnerStopped without RunnerStopping for %s: %v", e.Runner, kinds(evs))
+			}
+		case EventLaneReady:
+			if laneStopping {
+				t.Fatalf("LaneReady after LaneStopping: %v", kinds(evs))
+			}
+		}
+	}
+	if count[EventRunnerStarting] != n || count[EventRunnerStopping] != n || count[EventRunnerStopped] != n {
+		t.Fatalf("expected %d starting/stopping/stopped events: %v", n, count)
+	}
+	if count[EventLaneStopping] != 1 || count[EventLaneReady] > 1 {
+		t.Fatalf("unexpected lane event counts: %v", count)
 	}
 }
