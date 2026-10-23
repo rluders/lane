@@ -11,6 +11,8 @@ behave. The lifecycle guarantees Lane provides are in
 - [Built-in: WorkerRunner](#workerrunner)
 - [Built-in: SchedulerRunner](#schedulerrunner)
 - [Built-in: HTTPRunner](#httprunner)
+- [Built-in: TCPRunner](#tcprunner)
+- [Built-in: FuncRunner](#funcrunner)
 
 ## The contract
 
@@ -315,3 +317,44 @@ fixed schedule.
   the shutdown deadline.
 - `WithTLS(certFile, keyFile)` serves TLS. Everything else (timeouts,
   handler, `TLSConfig`) is configured on the `*http.Server` you pass in.
+
+### TCPRunner
+
+`runners.NewTCPRunner(name, addr, handler, opts...)` accepts TCP connections
+and serves each one with `handler(ctx, conn)` in its own goroutine.
+
+- Binds in `Start`; a bind (or TLS key loading) error fails startup.
+- Implements `Readier`: ready once bound. `Addr()` returns the bound address,
+  which is useful with port `0`.
+- When shutdown begins, the listener closes and the handlers' `ctx` is
+  cancelled. Handlers should finish their current exchange and return. `Stop`
+  waits for them until its deadline, then force-closes the remaining
+  connections and returns `context.DeadlineExceeded`.
+- The runner closes each `conn` after its handler returns. `Start` returns
+  only after every handler has returned.
+- Temporary accept errors are retried with a short backoff (5ms–1s). Other
+  accept errors make `Start` return the error.
+- `WithTLS(certFile, keyFile)` serves TLS.
+
+```go
+echo := runners.NewTCPRunner("echo", ":9000", func(ctx context.Context, c net.Conn) {
+    io.Copy(c, c)
+})
+```
+
+### FuncRunner
+
+`runners.NewFuncRunner(name, fn, opts...)` turns a function into a runner:
+`Start` calls `fn(ctx)` and returns its result, so `fn` must block until `ctx`
+is cancelled (returning earlier means "finished"). `WithStop(fn)` sets what
+`Stop` does. Without it, `Stop` is a no-op.
+
+```go
+l.AddRunner(runners.NewFuncRunner("consumer", func(ctx context.Context) error {
+    return client.Consume(ctx, handle) // blocks until ctx is cancelled
+}, runners.WithStop(func(context.Context) error { return client.Close() })))
+```
+
+New built-in runners must meet the criteria in
+[ADR 0003](adr/0003-built-in-runners.md).
+

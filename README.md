@@ -145,6 +145,8 @@ All implementations live in the `runners/` sub-package.
 | Runner | Constructor | Description |
 |--------|-------------|-------------|
 | HTTP | `runners.NewHTTPRunner(name, server, opts...)` | Wraps `*http.Server`. Calls `Shutdown` on stop. `WithTLS(cert, key)` serves TLS. |
+| TCP | `runners.NewTCPRunner(name, addr, handler, opts...)` | Accepts TCP connections, one goroutine per connection. Ready on bind; graceful drain then forced close at the shutdown deadline. `WithTLS` supported. |
+| Func | `runners.NewFuncRunner(name, fn, opts...)` | Runs a blocking `func(ctx) error` as a runner; `WithStop(fn)` for cleanup. |
 | Worker | `runners.NewWorkerRunner(name, fn, opts...)` | Runs a `runners.Func` in a loop until ctx is cancelled. Backs off exponentially (100ms–30s by default) after errors; tune with `WithBackoff(initial, max)` and `WithBackoffJitter()`. |
 | Scheduler | `runners.NewSchedulerRunner(name, interval, fn, opts...)` | Runs a `runners.Func` at a fixed rate, first run after one interval (`WithImmediateRun()` to run at start). Runs never overlap; ticks missed by a slow job are dropped. Errors are logged and scheduling continues. |
 
