@@ -13,8 +13,9 @@ import (
 
 var errWork = errors.New("work failed")
 
-func newTestWorker(fn WorkFn, base, max time.Duration, opts ...WorkerOption) *WorkerRunner {
-	w := NewWorkerRunner("test", fn, slog.New(slog.NewTextHandler(io.Discard, nil)), opts...)
+func newTestWorker(fn Func, base, max time.Duration, opts ...Option) *WorkerRunner {
+	opts = append([]Option{WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))}, opts...)
+	w := NewWorkerRunner("test", fn, opts...)
 	w.baseBackoff = base
 	w.maxBackoff = max
 	return w
@@ -172,7 +173,7 @@ func TestWithBackoff(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := NewWorkerRunner("w", noop, log, WithBackoff(tt.initial, tt.max))
+			w := NewWorkerRunner("w", noop, WithLogger(log), WithBackoff(tt.initial, tt.max))
 			if w.baseBackoff != tt.wantBase || w.maxBackoff != tt.wantMax {
 				t.Fatalf("got base=%v max=%v, want base=%v max=%v", w.baseBackoff, w.maxBackoff, tt.wantBase, tt.wantMax)
 			}
@@ -186,7 +187,7 @@ func TestWithBackoff_AppliesToStart(t *testing.T) {
 	w := NewWorkerRunner("w", func(ctx context.Context) error {
 		calls.Add(1)
 		return errWork
-	}, log, WithBackoff(time.Hour, time.Hour))
+	}, WithLogger(log), WithBackoff(time.Hour, time.Hour))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -202,12 +203,12 @@ func TestBackoffJitter(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	noop := func(context.Context) error { return nil }
 
-	plain := NewWorkerRunner("w", noop, log)
+	plain := NewWorkerRunner("w", noop, WithLogger(log))
 	if d := plain.delay(time.Second); d != time.Second {
 		t.Fatalf("without jitter: got %v, want 1s", d)
 	}
 
-	jittered := NewWorkerRunner("w", noop, log, WithBackoffJitter())
+	jittered := NewWorkerRunner("w", noop, WithLogger(log), WithBackoffJitter())
 	seen := map[time.Duration]bool{}
 	for range 100 {
 		d := jittered.delay(time.Second)

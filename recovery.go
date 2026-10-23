@@ -8,7 +8,7 @@ import (
 	"runtime/debug"
 )
 
-// PanicError is returned by Lane.Run when a Runner's Start, Ready, or Stop
+// PanicError is returned by Lane.Run when a Runner's Start, WaitReady, or Stop
 // panics. Lane recovers the panic, logs the stack trace, and treats it like an
 // error returned from that method. Use errors.As to inspect it.
 type PanicError struct {

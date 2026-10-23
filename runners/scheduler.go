@@ -7,12 +7,9 @@ import (
 	"time"
 )
 
-// JobFn is a periodic task. A returned error is reported to the scheduler's
-// error handler (by default it is logged) and scheduling continues.
-// Retries and backoff for a failing job belong inside JobFn.
-type JobFn func(ctx context.Context) error
-
-// SchedulerRunner executes a JobFn on a fixed interval.
+// SchedulerRunner executes a Func (the job) on a fixed interval. A job error is
+// reported to the error handler (by default it is logged) and scheduling
+// continues; retries and backoff for a failing job belong inside the Func.
 //
 // Execution semantics:
 //   - Fixed rate: runs are aligned to ticks every interval, measured from Start.
@@ -30,34 +27,28 @@ type JobFn func(ctx context.Context) error
 type SchedulerRunner struct {
 	name      string
 	interval  time.Duration
-	fn        JobFn
+	fn        Func
 	log       *slog.Logger
 	immediate bool
 	onError   func(err error)
 }
 
-type SchedulerOption func(*SchedulerRunner)
-
-// WithImmediateRun runs the job once as soon as Start is called, then on every
-// tick. The interval is still measured from Start, so the first tick is not
-// delayed by the immediate run.
-func WithImmediateRun() SchedulerOption {
-	return func(s *SchedulerRunner) { s.immediate = true }
-}
-
-// WithJobErrorHandler overrides the default log-and-continue job error handler.
-// The scheduler keeps running after the handler returns.
-func WithJobErrorHandler(fn func(err error)) SchedulerOption {
-	return func(s *SchedulerRunner) { s.onError = fn }
-}
-
-func NewSchedulerRunner(name string, interval time.Duration, fn JobFn, log *slog.Logger, opts ...SchedulerOption) *SchedulerRunner {
-	s := &SchedulerRunner{name: name, interval: interval, fn: fn, log: log}
-	s.onError = func(err error) {
-		log.Error("scheduler job failed", "scheduler", name, "error", err)
+// NewSchedulerRunner creates a SchedulerRunner. Applicable options:
+// WithLogger, WithErrorHandler, WithImmediateRun.
+func NewSchedulerRunner(name string, interval time.Duration, fn Func, opts ...Option) *SchedulerRunner {
+	o := newOptions(opts)
+	s := &SchedulerRunner{
+		name:      name,
+		interval:  interval,
+		fn:        fn,
+		log:       o.log,
+		immediate: o.immediate,
+		onError:   o.onError,
 	}
-	for _, o := range opts {
-		o(s)
+	if s.onError == nil {
+		s.onError = func(err error) {
+			s.log.Error("scheduler job failed", "scheduler", name, "error", err)
+		}
 	}
 	return s
 }

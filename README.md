@@ -75,13 +75,13 @@ func main() {
 
     mux := http.NewServeMux()
 
-    l := lane.New(log, lane.WithShutdownTimeout(10*time.Second))
+    l := lane.New(lane.WithLogger(log), lane.WithShutdownTimeout(10*time.Second))
 
     mux.Handle("GET /ready", lane.ReadinessHandler(l.Health()))
     mux.Handle("GET /live", lane.LivenessHandler(l.Health()))
 
     server := &http.Server{Addr: ":8080", Handler: mux}
-    l.AddRunner(runners.NewHTTPRunner("api", server, log))
+    l.AddRunner(runners.NewHTTPRunner("api", server, runners.WithLogger(log)))
 
     if err := l.Run(context.Background()); err != nil {
         log.Error("lane error", "error", err)
@@ -128,7 +128,7 @@ type Runner interface {
 - `Stop` initiates graceful shutdown and **must respect the context deadline**
 - If `Start` returns a non-nil error, lane cancels all other runners. Once shutdown has begun, returning `ctx.Err()` (`context.Canceled`/`DeadlineExceeded`) from `Start` counts as a clean exit, so `Run` returns `nil` on a normal SIGTERM
 - A panic in `Start`, `Ready`, or `Stop` is recovered, logged with its stack trace, and treated as an error from that method (`*lane.PanicError`). Goroutines a runner spawns itself are not covered — use `lane.Go`
-- Optionally implement `lane.Readier` (`Ready(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
+- Optionally implement `lane.Readier` (`WaitReady(ctx) error`, blocks until ready) to delay lane's readiness until the runner is actually up; `HTTPRunner` does this once its listener is bound
 - Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
 - Shutdown is bounded by the shutdown timeout: lane never waits past it for a `Stop` or `Start` that ignores its context. Such runners are reported in the returned error (`context.DeadlineExceeded`) and left running
 - `Run` returns the first runner error joined with all `Stop` errors (use `errors.Is` to inspect)
@@ -139,17 +139,18 @@ All implementations live in the `runners/` sub-package.
 
 | Runner | Constructor | Description |
 |--------|-------------|-------------|
-| HTTP | `runners.NewHTTPRunner(name, server, log)` | Wraps `*http.Server`. Calls `Shutdown` on stop. |
-| HTTPS | `runners.NewHTTPSRunner(name, server, certFile, keyFile, log)` | Same as HTTPRunner with TLS. |
-| Worker | `runners.NewWorkerRunner(name, fn, log)` | Runs a `WorkFn` in a loop until ctx is cancelled. Backs off exponentially (100ms–30s by default) after errors; tune with `WithBackoff(initial, max)` and `WithBackoffJitter()`. |
-| Scheduler | `runners.NewSchedulerRunner(name, interval, fn, log)` | Runs a `JobFn` at a fixed rate, first run after one interval (`WithImmediateRun()` to run at start). Runs never overlap; ticks missed by a slow job are dropped. Job errors are logged (`WithJobErrorHandler`) and scheduling continues. |
+| HTTP | `runners.NewHTTPRunner(name, server, opts...)` | Wraps `*http.Server`. Calls `Shutdown` on stop. `WithTLS(cert, key)` serves TLS. |
+| Worker | `runners.NewWorkerRunner(name, fn, opts...)` | Runs a `runners.Func` in a loop until ctx is cancelled. Backs off exponentially (100ms–30s by default) after errors; tune with `WithBackoff(initial, max)` and `WithBackoffJitter()`. |
+| Scheduler | `runners.NewSchedulerRunner(name, interval, fn, opts...)` | Runs a `runners.Func` at a fixed rate, first run after one interval (`WithImmediateRun()` to run at start). Runs never overlap; ticks missed by a slow job are dropped. Errors are logged and scheduling continues. |
+
+All runners share one `runners.Option` type. `WithLogger(log)` (default `slog.Default()`) and `WithErrorHandler(fn)` (worker and scheduler) apply everywhere; options that don't apply to a runner are ignored.
 
 ### Worker example
 
 ```go
 worker := runners.NewWorkerRunner("processor", func(ctx context.Context) error {
     return processNextMessage(ctx)
-}, log)
+})
 l.AddRunner(worker)
 ```
 
@@ -158,7 +159,7 @@ l.AddRunner(worker)
 ```go
 sched := runners.NewSchedulerRunner("cleanup", 5*time.Minute, func(ctx context.Context) error {
     return purgeExpiredSessions(ctx)
-}, log)
+})
 l.AddRunner(sched)
 ```
 
@@ -245,7 +246,7 @@ handler = lane.RecoverMiddleware(log)(handler)
 Default shutdown timeout is **30 seconds**. Override with `WithShutdownTimeout`:
 
 ```go
-l := lane.New(log, lane.WithShutdownTimeout(10*time.Second))
+l := lane.New(lane.WithShutdownTimeout(10*time.Second))
 ```
 
 Each runner's `Stop` is called with a context that respects this deadline. If a runner does not stop within the timeout, shutdown proceeds without it.
@@ -263,6 +264,24 @@ Avoid it if you need:
 - ❌ A dependency injection container
 - ❌ A full application framework with routing conventions
 - ❌ Managed configuration, observability, or deployment tooling
+
+## ⬆️ Migrating from v1
+
+| v1 | v2 |
+|----|----|
+| `import "github.com/rluders/lane"` | `import "github.com/rluders/lane/v2"` |
+| `lane.New(log, opts...)` | `lane.New(lane.WithLogger(log), opts...)` (logger optional, defaults to `slog.Default()`) |
+| `*lane.HealthState`, `SetReady`, `IsReady()` | `*lane.Health` with `State()`, `Live()`, `Ready()`; state is driven by lane only |
+| `lane.LivenessHandler()` | `lane.LivenessHandler(l.Health())` (503 once stopped) |
+| `RunHealthCheck`/`CheckHealth` default path `/health` | default path `/live` (`WithHealthPath` to override) |
+| `Readier.Ready(ctx) error` | `Readier.WaitReady(ctx) error` |
+| `runners.NewHTTPRunner(name, srv, log)` | `runners.NewHTTPRunner(name, srv, runners.WithLogger(log))` |
+| `runners.NewHTTPSRunner(name, srv, cert, key, log)` | `runners.NewHTTPRunner(name, srv, runners.WithTLS(cert, key))` |
+| `runners.NewWorkerRunner(name, fn, log, opts...)` | `runners.NewWorkerRunner(name, fn, opts...)` |
+| `runners.NewSchedulerRunner(name, d, fn, log, opts...)` | `runners.NewSchedulerRunner(name, d, fn, opts...)` |
+| `runners.WorkFn`, `runners.JobFn` | `runners.Func` |
+| `runners.WorkerOption`, `runners.SchedulerOption` | `runners.Option` |
+| `runners.WithJobErrorHandler` | `runners.WithErrorHandler` |
 
 ## 🧪 Development
 
