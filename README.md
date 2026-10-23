@@ -118,6 +118,8 @@ type Runner interface {
 - `Start` **must block** until the runner stops or fails
 - `Stop` initiates graceful shutdown and **must respect the context deadline**
 - If `Start` returns a non-nil error, lane cancels all other runners
+- Every runner receives `Stop` during shutdown, even if another runner's `Stop` failed or the shutdown timeout expired
+- `Run` returns the first runner error joined with all `Stop` errors (use `errors.Is` to inspect)
 
 ## 📦 Built-in Runners
 

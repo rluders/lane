@@ -2,6 +2,8 @@ package lane
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -54,7 +56,14 @@ func (l *Lane) Health() *HealthState {
 
 // Run starts all runners concurrently, blocks until a signal or runner failure,
 // then shuts down runners in reverse registration order.
-// Returns the first runner error, or nil on clean shutdown.
+//
+// Every runner receives Stop, even if an earlier Stop failed or the shutdown
+// timeout expired; in the latter case runners get an already-expired ctx and
+// must return promptly. Stop is called on every runner, including those whose
+// Start already returned.
+//
+// Returns nil on clean shutdown. Otherwise returns the first runner error
+// joined (errors.Join) with every Stop error, in stop order.
 func (l *Lane) Run(ctx context.Context) error {
 	sigCh, stopSignals := setupSignals()
 	defer stopSignals()
@@ -89,12 +98,14 @@ func (l *Lane) Run(ctx context.Context) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), l.shutdownTimeout)
 	defer shutdownCancel()
 
+	var stopErrs []error
 	for i := len(l.runners) - 1; i >= 0; i-- {
 		r := l.runners[i]
 		if err := r.Stop(shutdownCtx); err != nil {
 			l.log.Error("runner stop error", "runner", r.Name(), "error", err)
+			stopErrs = append(stopErrs, fmt.Errorf("stop %s: %w", r.Name(), err))
 		}
 	}
 
-	return g.Wait()
+	return errors.Join(append([]error{g.Wait()}, stopErrs...)...)
 }
