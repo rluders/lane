@@ -191,6 +191,19 @@ When invoked as `myservice healthcheck`, the process sends `GET` to the endpoint
 
 ## 🛡️ Recovery
 
+### Panic policy
+
+| Where the panic happens | Recovered by | Effect |
+|---|---|---|
+| `Runner.Start` / `Ready` (incl. `WorkerRunner` and `SchedulerRunner` work functions, which run inside `Start`) | lane | Treated as a runner failure: graceful shutdown, `Run` returns a `*lane.PanicError` |
+| `Runner.Stop` | lane | Recorded as a stop error (`*lane.PanicError`); remaining runners still stop |
+| Goroutine started with `lane.Go` | `lane.Go` | Logged; the provided `cancel` is called (graceful shutdown if it cancels lane's context). Not in `Run`'s error |
+| HTTP handler wrapped in `RecoverMiddleware` | middleware | Logged, HTTP 500; service continues |
+| HTTP handler without middleware | `net/http` | Connection closed; service continues |
+| Any other goroutine | nobody | Process crashes — wrap critical goroutines in `lane.Go` |
+
+Every recovered panic is logged at error level with the panic value under `panic` and the full stack trace under `stack`. Nothing is restarted.
+
 ### Goroutine recovery
 
 `lane.Go` runs a goroutine with structured panic recovery. On panic it logs the stack trace and calls the provided cancel function to propagate the failure up to lane.

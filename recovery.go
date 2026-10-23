@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"runtime"
 	"runtime/debug"
 )
 
@@ -41,8 +40,15 @@ func callRunner(log *slog.Logger, name, op string, fn func() error) (err error) 
 }
 
 // Go runs fn in a goroutine with structured panic recovery.
-// On panic: logs stack trace and calls cancel to propagate failure up.
-// Use this for goroutines that are critical to service operation.
+// On panic: logs the panic value and full stack trace, then calls cancel to
+// propagate the failure up. Use this for goroutines a Runner spawns that are
+// critical to service operation; Lane does not recover panics in goroutines
+// it did not start, so an unprotected panic there crashes the process.
+//
+// Pass the cancel of the context given to Lane.Run (or of a context derived
+// from the Runner's Start ctx that Start returns on) to turn a panic into a
+// graceful shutdown. The panic is reported in the log only, not in Run's
+// returned error. Go does not restart fn.
 func Go(ctx context.Context, log *slog.Logger, name string, cancel context.CancelFunc, fn func(ctx context.Context)) {
 	go func() {
 		defer recoverPanic(log, name, cancel)
@@ -58,13 +64,11 @@ func RecoverMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					buf := make([]byte, 4096)
-					n := runtime.Stack(buf, false)
 					log.Error("http handler panic",
 						"panic", fmt.Sprintf("%v", rec),
 						"method", r.Method,
 						"path", r.URL.Path,
-						"stack", string(buf[:n]),
+						"stack", string(debug.Stack()),
 					)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				}
@@ -76,12 +80,10 @@ func RecoverMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 
 func recoverPanic(log *slog.Logger, name string, cancel context.CancelFunc) {
 	if rec := recover(); rec != nil {
-		buf := make([]byte, 4096)
-		n := runtime.Stack(buf, false)
 		log.Error("goroutine panic",
 			"goroutine", name,
 			"panic", fmt.Sprintf("%v", rec),
-			"stack", string(buf[:n]),
+			"stack", string(debug.Stack()),
 		)
 		cancel()
 	}
